@@ -80,10 +80,10 @@ DockPetWin Aemeath 是一个 Windows 桌面陪伴应用。爱弥斯会在桌面�
 
 压缩包不会包含任何人的 API Key。新用户需要在设置里自行填写：
 
-- `DeepSeek API Key`：用于爱弥斯的 AI 对话。
+- `DeepSeek API Key`：用于爱弥斯的 AI 对话。申请和用量管理入口：[DeepSeek Platform](https://platform.deepseek.com/usage)。
 - `API Base URL`：默认使用 DeepSeek 兼容地址；如果你使用兼容服务，可以按服务商说明修改。
 - `Model`：填写要调用的模型名。
-- `Tavily API Key`：可选，用于联网搜索任务。不填写也能正常进行普通对话。
+- `Tavily API Key`：可选，用于联网搜索任务。不填写也能正常进行普通对话。申请入口：[Tavily](https://app.tavily.com/home)。
 
 ## 更新版本并保留 UserData
 
