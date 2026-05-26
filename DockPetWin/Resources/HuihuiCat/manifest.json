@@ -1,0 +1,24 @@
+{
+  "id": "huihui-cat",
+  "name": "Huihui",
+  "author": "yitian-ma",
+  "canvas_width": 1254,
+  "canvas_height": 1254,
+  "default_anchor": { "x": 0.5, "y": 0.88 },
+  "poses": {
+    "resting": "poses/resting",
+    "held": "poses/held",
+    "dialogue": "poses/dialogue",
+    "transition": "poses/transition"
+  },
+  "display_sizes": {
+    "held": { "width": 650, "height": 1236 }
+  },
+  "animations": {
+    "walk": {
+      "fps": 3,
+      "video_frame_count": 4,
+      "frames": []
+    }
+  }
+}

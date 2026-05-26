@@ -1,0 +1,558 @@
+using System.IO;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
+using DockCatWin.Core.HomeLife;
+
+namespace DockCatWin;
+
+public partial class HomeWindow : Window
+{
+    private static readonly Random PoseRandom = new();
+
+    private readonly string petName;
+    private readonly Func<CancellationToken, Task<string>> activityPlanner;
+    private readonly HomeLifeStore homeLifeStore;
+    private readonly Action openSettings;
+    private readonly Action openChat;
+    private readonly Dictionary<string, ImageSource> homePoses;
+    private readonly Dictionary<string, IReadOnlyList<ImageSource>> homePoseFrames;
+    private readonly DispatcherTimer resumeLifeTimer = new() { Interval = TimeSpan.FromSeconds(45) };
+    private HomePlacement currentPlacement = HomePlacement.Idle;
+    private bool hasRenderedPlacement;
+    private CancellationTokenSource? activePlanner;
+    private HomeLifeEntry? activeHomeLife;
+    private Storyboard? activeMoveStoryboard;
+    private DispatcherTimer? walkFrameTimer;
+    private DispatcherTimer? actionFrameTimer;
+    private int walkFrameIndex;
+    private int actionFrameIndex;
+
+    public HomeWindow(
+        string petName,
+        ImageSource? petImage,
+        Func<CancellationToken, Task<string>> activityPlanner,
+        HomeLifeStore homeLifeStore,
+        Action openSettings,
+        Action openChat)
+    {
+        this.petName = string.IsNullOrWhiteSpace(petName) ? "桌宠" : petName.Trim();
+        this.activityPlanner = activityPlanner;
+        this.homeLifeStore = homeLifeStore;
+        this.openSettings = openSettings;
+        this.openChat = openChat;
+        homePoses = LoadHomePoses();
+        homePoseFrames = LoadHomePoseFrames();
+        InitializeComponent();
+        Title = $"{this.petName}的小屋";
+        TitleText.Text = $"{this.petName}的小屋";
+        ApplyActivityPose("idle", petImage);
+        resumeLifeTimer.Tick += async (_, _) =>
+        {
+            resumeLifeTimer.Stop();
+            await RefreshActivityAsync();
+        };
+        Loaded += async (_, _) =>
+        {
+            RefreshHomeLogText();
+            await RefreshActivityAsync();
+        };
+        Closed += (_, _) =>
+        {
+            activePlanner?.Cancel();
+            FinishActiveHomeLife(interrupted: false);
+            activeMoveStoryboard?.Stop();
+            resumeLifeTimer.Stop();
+            StopWalkLoop();
+            StopActionLoop();
+        };
+    }
+
+    private async void RefreshActivity_Click(object sender, RoutedEventArgs e)
+    {
+        await RefreshActivityAsync();
+    }
+
+    private void Close_Click(object sender, RoutedEventArgs e)
+    {
+        Close();
+    }
+
+    private void Settings_Click(object sender, RoutedEventArgs e)
+    {
+        openSettings();
+    }
+
+    private void Chat_Click(object sender, RoutedEventArgs e)
+    {
+        openChat();
+    }
+
+    public void HandleChatStarted(string userMessage)
+    {
+        resumeLifeTimer.Stop();
+        activePlanner?.Cancel();
+        FinishActiveHomeLife(interrupted: true);
+        HomeSpeechBubble.Visibility = Visibility.Visible;
+        HomeSpeechText.Text = "等一下，我听着呢。";
+        ActivityText.Text = $"{petName}被你叫住了，先把手里的事放一放。";
+        StatusText.Text = "正在小屋里对话";
+        ApplyActivityPose("idle");
+    }
+
+    public void ShowChatReply(string reply)
+    {
+        var text = string.IsNullOrWhiteSpace(reply) ? "嗯？我刚刚有点走神。" : reply.Trim();
+        HomeSpeechBubble.Visibility = Visibility.Visible;
+        HomeSpeechText.Text = text.Length > 96 ? text[..96] + "..." : text;
+        ActivityText.Text = $"{petName}正在和你说话。";
+        StatusText.Text = "已在小屋内回复";
+        resumeLifeTimer.Stop();
+        resumeLifeTimer.Start();
+    }
+
+    private async Task RefreshActivityAsync()
+    {
+        activePlanner?.Cancel();
+        activePlanner?.Dispose();
+        activePlanner = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        StatusText.Text = $"{petName}正在想今天在家做什么...";
+
+        try
+        {
+            var activity = await activityPlanner(activePlanner.Token);
+            ActivityText.Text = string.IsNullOrWhiteSpace(activity)
+                ? $"{petName}坐在窗边发呆充电。"
+                : activity.Trim();
+            ApplyActivityPose(ActivityText.Text);
+            StartHomeLife(ActivityText.Text, "self");
+            StatusText.Text = "小屋状态已更新";
+        }
+        catch (OperationCanceledException)
+        {
+            ActivityText.Text = $"{petName}换了个姿势。";
+            ApplyActivityPose("idle");
+            StatusText.Text = "活动判断被取消";
+        }
+        catch
+        {
+            ActivityText.Text = $"{petName}整理裙摆休息。";
+            ApplyActivityPose("rest");
+            StartHomeLife(ActivityText.Text, "fallback");
+            StatusText.Text = "AI 判断失败，已使用本地动作";
+        }
+    }
+
+    private void ApplyActivityPose(string activity, ImageSource? fallback = null)
+    {
+        var target = PickPlacement(activity);
+        if (!hasRenderedPlacement)
+        {
+            currentPlacement = target;
+            PetImage.Source = GetPose(target.PoseName) ?? fallback ?? PetImage.Source;
+            ApplyPlacement(target);
+            hasRenderedPlacement = true;
+            StartActionLoop(target.PoseName);
+            return;
+        }
+
+        MoveToPlacement(target, fallback);
+    }
+
+    private HomePlacement PickPlacement(string activity)
+    {
+        if (homePoses.Count == 0)
+        {
+            return HomePlacement.Idle;
+        }
+
+        var text = activity.ToLowerInvariant();
+        if (text.Contains("game") || text.Contains("tetris") || text.Contains("\u6e38\u620f") || text.Contains("\u7535\u7ade") || text.Contains("\u4fc4\u7f57\u65af\u65b9\u5757") || text.Contains("\u7535\u8111"))
+        {
+            return HomePlacement.PlayGame;
+        }
+
+        if (text.Contains("tea") || text.Contains("\u8336") || text.Contains("\u559d\u8336") || text.Contains("\u559d\u6c34"))
+        {
+            return HomePlacement.DrinkTea;
+        }
+
+        if (text.Contains("desk") || text.Contains("write") || text.Contains("\u5199") || text.Contains("\u7eb8\u6761") || text.Contains("\u4e66\u684c") || text.Contains("\u5199\u5b57"))
+        {
+            return HomePlacement.WriteDesk;
+        }
+
+        if (text.Contains("book") || text.Contains("read") || text.Contains("\u8bfb") || text.Contains("\u4e66") || text.Contains("\u770b\u4e66"))
+        {
+            return HomePlacement.ReadSofa;
+        }
+        if (text.Contains("游戏") || text.Contains("电竞") || text.Contains("俄罗斯方块") || text.Contains("tetris") || text.Contains("game")) return HomePlacement.PlayGame;
+        if (text.Contains("写") || text.Contains("纸条") || text.Contains("desk")) return HomePlacement.ReadSofa;
+        if (text.Contains("读") || text.Contains("书") || text.Contains("电视") || text.Contains("tv") || text.Contains("book")) return HomePlacement.ReadSofa;
+        if (text.Contains("茶") || text.Contains("喝") || text.Contains("tea")) return HomePlacement.DrinkTea;
+        if (text.Contains("睡") || text.Contains("小睡") || text.Contains("枕") || text.Contains("cushion")) return HomePlacement.SleepBed;
+        if (text.Contains("床") || text.Contains("坐")) return HomePlacement.SitBed;
+        if (text.Contains("走") || text.Contains("散步") || text.Contains("逛")) return PoseRandom.Next(2) == 0 ? HomePlacement.WalkHallLeft : HomePlacement.WalkHallRight;
+        if (text.Contains("idle") || text.Contains("站")) return HomePlacement.Idle;
+
+        var options = new[]
+        {
+            HomePlacement.Idle,
+            HomePlacement.SitBed,
+            HomePlacement.WriteDesk,
+            HomePlacement.ReadSofa,
+            HomePlacement.DrinkTea,
+            HomePlacement.SleepBed,
+            HomePlacement.PlayGame
+        };
+        return options[PoseRandom.Next(options.Length)];
+    }
+
+    private ImageSource? GetPose(string name)
+    {
+        return homePoses.TryGetValue(name, out var pose) ? pose : homePoses.Values.FirstOrDefault();
+    }
+
+    private void UpdatePetPlacement()
+    {
+        ApplyPlacement(currentPlacement);
+    }
+
+    private void MoveToPlacement(HomePlacement target, ImageSource? fallback)
+    {
+        StopActionLoop();
+        activeMoveStoryboard?.Stop();
+        var from = currentPlacement;
+        var targetLeft = target.CenterX - target.Width / 2;
+        var targetTop = target.BottomY - target.Height;
+        var currentLeft = Canvas.GetLeft(PetImage);
+        var currentTop = Canvas.GetTop(PetImage);
+        if (double.IsNaN(currentLeft) || double.IsNaN(currentTop))
+        {
+            currentLeft = from.CenterX - from.Width / 2;
+            currentTop = from.BottomY - from.Height;
+        }
+
+        var walkPoseName = target.CenterX < from.CenterX ? "walk_left" : "walk_right";
+        PetImage.Source = GetPose(walkPoseName) ?? PetImage.Source;
+        PetImage.Width = target.Width;
+        PetImage.Height = target.Height;
+        System.Windows.Controls.Panel.SetZIndex(PetImage, target.ZIndex);
+        StartWalkLoop(walkPoseName);
+
+        var distance = Math.Abs(targetLeft - currentLeft) + Math.Abs(targetTop - currentTop);
+        var duration = TimeSpan.FromMilliseconds(Math.Clamp(distance * 2.3, 900, 2600));
+        var easing = new CubicEase { EasingMode = EasingMode.EaseInOut };
+        var storyboard = new Storyboard();
+
+        var leftAnimation = new DoubleAnimation(currentLeft, targetLeft, duration) { EasingFunction = easing };
+        Storyboard.SetTarget(leftAnimation, PetImage);
+        Storyboard.SetTargetProperty(leftAnimation, new PropertyPath("(Canvas.Left)"));
+        storyboard.Children.Add(leftAnimation);
+
+        var topAnimation = new DoubleAnimation(currentTop, targetTop, duration) { EasingFunction = easing };
+        Storyboard.SetTarget(topAnimation, PetImage);
+        Storyboard.SetTargetProperty(topAnimation, new PropertyPath("(Canvas.Top)"));
+        storyboard.Children.Add(topAnimation);
+
+        storyboard.Completed += (_, _) =>
+        {
+            StopWalkLoop();
+            currentPlacement = target;
+            PetImage.Source = GetPose(target.PoseName) ?? fallback ?? PetImage.Source;
+            ApplyPlacement(target);
+            StartActionLoop(target.PoseName);
+        };
+        activeMoveStoryboard = storyboard;
+        storyboard.Begin();
+    }
+
+    private void ApplyPlacement(HomePlacement placement)
+    {
+        PetImage.Width = placement.Width;
+        PetImage.Height = placement.Height;
+        System.Windows.Controls.Panel.SetZIndex(PetImage, placement.ZIndex);
+        Canvas.SetLeft(PetImage, placement.CenterX - placement.Width / 2);
+        Canvas.SetTop(PetImage, placement.BottomY - placement.Height);
+    }
+
+    private void StartHomeLife(string activity, string trigger)
+    {
+        FinishActiveHomeLife(interrupted: false);
+        activeHomeLife = new HomeLifeEntry
+        {
+            Activity = ToActivityTitle(activity),
+            Details = activity,
+            Mood = InferMood(activity),
+            StartedAt = DateTime.Now,
+            Trigger = trigger
+        };
+        RefreshHomeLogText();
+    }
+
+    private void FinishActiveHomeLife(bool interrupted)
+    {
+        if (activeHomeLife is null)
+        {
+            return;
+        }
+
+        activeHomeLife.EndedAt = DateTime.Now;
+        activeHomeLife.InterruptedByUser = interrupted;
+        homeLifeStore.Append(activeHomeLife);
+        activeHomeLife = null;
+        RefreshHomeLogText();
+    }
+
+    private void RefreshHomeLogText()
+    {
+        HomeLogText.Text = homeLifeStore.BuildRecentSummary(3);
+    }
+
+    private static string ToActivityTitle(string activity)
+    {
+        var text = activity.Trim();
+        if (text.Length <= 18)
+        {
+            return text;
+        }
+
+        return text[..18] + "...";
+    }
+
+    private static string InferMood(string activity)
+    {
+        if (activity.Contains("睡") || activity.Contains("小睡") || activity.Contains("软垫"))
+        {
+            return "放松";
+        }
+
+        if (activity.Contains("读") || activity.Contains("书") || activity.Contains("写") || activity.Contains("纸条"))
+        {
+            return "专注";
+        }
+
+        if (activity.Contains("茶") || activity.Contains("喝"))
+        {
+            return "惬意";
+        }
+
+        if (activity.Contains("等") || activity.Contains("回来"))
+        {
+            return "期待";
+        }
+
+        return "平静";
+    }
+
+    private void StartWalkLoop(string poseName)
+    {
+        StopWalkLoop();
+        var frames = GetFrames(poseName);
+        if (frames.Count <= 1)
+        {
+            return;
+        }
+
+        walkFrameIndex = 0;
+        walkFrameTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(120)
+        };
+        walkFrameTimer.Tick += (_, _) =>
+        {
+            PetImage.Source = frames[walkFrameIndex % frames.Count];
+            walkFrameIndex++;
+        };
+        walkFrameTimer.Start();
+    }
+
+    private void StopWalkLoop()
+    {
+        if (walkFrameTimer is null)
+        {
+            return;
+        }
+
+        walkFrameTimer.Stop();
+        walkFrameTimer = null;
+    }
+
+    private void StartActionLoop(string poseName)
+    {
+        StopActionLoop();
+        var frames = GetFrames(poseName);
+        if (frames.Count <= 1)
+        {
+            return;
+        }
+
+        actionFrameIndex = 0;
+        actionFrameTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(IsSleepPose(poseName) ? 850 : 520)
+        };
+        actionFrameTimer.Tick += (_, _) =>
+        {
+            PetImage.Source = frames[actionFrameIndex % frames.Count];
+            actionFrameIndex++;
+        };
+        actionFrameTimer.Start();
+    }
+
+    private void StopActionLoop()
+    {
+        if (actionFrameTimer is null)
+        {
+            return;
+        }
+
+        actionFrameTimer.Stop();
+        actionFrameTimer = null;
+    }
+
+    private IReadOnlyList<ImageSource> GetFrames(string poseName)
+    {
+        if (homePoseFrames.TryGetValue(poseName, out var frames))
+        {
+            return frames;
+        }
+
+        var pose = GetPose(poseName);
+        return pose is null ? Array.Empty<ImageSource>() : new[] { pose };
+    }
+
+    private static bool IsSleepPose(string poseName)
+    {
+        return poseName.Contains("sleep", StringComparison.OrdinalIgnoreCase)
+            || poseName.Contains("cushion", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Dictionary<string, ImageSource> LoadHomePoses()
+    {
+        var directory = Path.Combine(AppContext.BaseDirectory, "Resources", "Home", "aimis");
+        if (!Directory.Exists(directory))
+        {
+            return new Dictionary<string, ImageSource>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        var poses = new Dictionary<string, ImageSource>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in Directory.EnumerateFiles(directory, "*.png").OrderBy(Path.GetFileName))
+        {
+            var name = Path.GetFileNameWithoutExtension(file);
+            if (string.IsNullOrWhiteSpace(name) || name.Contains("preview") || name.Contains("sheet") || name.Contains('.') || IsFrameAssetName(name))
+            {
+                continue;
+            }
+
+            try
+            {
+                var image = new BitmapImage();
+                image.BeginInit();
+                image.CacheOption = BitmapCacheOption.OnLoad;
+                image.UriSource = new System.Uri(file, System.UriKind.Absolute);
+                image.EndInit();
+                image.Freeze();
+                poses[name] = image;
+            }
+            catch
+            {
+                // Ignore broken optional pose assets; the home window can still use the default pet pose.
+            }
+        }
+
+        return poses;
+    }
+
+    private static Dictionary<string, IReadOnlyList<ImageSource>> LoadHomePoseFrames()
+    {
+        var directory = Path.Combine(AppContext.BaseDirectory, "Resources", "Home", "aimis");
+        if (!Directory.Exists(directory))
+        {
+            return new Dictionary<string, IReadOnlyList<ImageSource>>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        var frames = new Dictionary<string, IReadOnlyList<ImageSource>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var baseFile in Directory.EnumerateFiles(directory, "*.png").OrderBy(Path.GetFileName))
+        {
+            var baseName = Path.GetFileNameWithoutExtension(baseFile);
+            if (string.IsNullOrWhiteSpace(baseName) || IsFrameAssetName(baseName) || baseName.Contains("preview") || baseName.Contains("sheet") || baseName.Contains('.'))
+            {
+                continue;
+            }
+
+            var relatedFrames = Directory.EnumerateFiles(directory, $"{baseName}_*.png")
+                .OrderBy(Path.GetFileName)
+                .Select(TryLoadImage)
+                .Where(image => image is not null)
+                .Cast<ImageSource>()
+                .ToList();
+
+            if (relatedFrames.Count == 0)
+            {
+                var baseImage = TryLoadImage(baseFile);
+                if (baseImage is not null)
+                {
+                    relatedFrames.Add(baseImage);
+                }
+            }
+
+            if (relatedFrames.Count > 0)
+            {
+                frames[baseName] = relatedFrames;
+            }
+        }
+
+        return frames;
+    }
+
+    private static bool IsFrameAssetName(string name)
+    {
+        if (name.Length < 4 || name[^3] != '_')
+        {
+            return false;
+        }
+
+        return char.IsDigit(name[^2]) && char.IsDigit(name[^1]);
+    }
+
+    private static ImageSource? TryLoadImage(string file)
+    {
+        try
+        {
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.UriSource = new System.Uri(file, System.UriKind.Absolute);
+            image.EndInit();
+            image.Freeze();
+            return image;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private sealed record HomePlacement(
+        string PoseName,
+        double CenterX,
+        double BottomY,
+        double Width,
+        double Height,
+        int ZIndex)
+    {
+        public static readonly HomePlacement Idle = new("idle_front", 715, 895, 150, 190, 10);
+        public static readonly HomePlacement SitBed = new("sit_bed", 300, 710, 160, 170, 10);
+        public static readonly HomePlacement SleepBed = new("sleep_cushion", 285, 650, 215, 150, 10);
+        public static readonly HomePlacement WriteDesk = new("read_desk_back_anchor", 960, 530, 210, 170, 10);
+        public static readonly HomePlacement ReadSofa = new("read_sofa_anchor", 1108, 935, 205, 175, 10);
+        public static readonly HomePlacement DrinkTea = new("drink_tea_anchor", 1372, 910, 205, 175, 10);
+        public static readonly HomePlacement PlayGame = new("play_game_anchor", 1495, 630, 210, 175, 10);
+        public static readonly HomePlacement WalkHallLeft = new("walk_left", 690, 760, 145, 170, 10);
+        public static readonly HomePlacement WalkHallRight = new("walk_right", 1240, 825, 145, 170, 10);
+    }
+}

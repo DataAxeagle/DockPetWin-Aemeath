@@ -1,0 +1,21 @@
+{
+    "CatName":  "爱弥斯",
+    "CatIdentifier":  "Aemeath",
+    "UserSalutation":  "漂泊者",
+    "SelectedAssetPackID":  "my-pink-character",
+    "RemindersEnabled":  true,
+    "WaterReminderIntervalSeconds":  1800,
+    "MovementReminderIntervalSeconds":  3600,
+    "ReminderSchemaInitialized":  false,
+    "Reminders":  [
+
+                  ],
+    "RestDurationMinimumSeconds":  120,
+    "RestDurationMaximumSeconds":  180,
+    "WalkDurationMinimumSeconds":  120,
+    "WalkDurationMaximumSeconds":  300,
+    "WalkBaseSpeed":  36,
+    "CatScalePercent":  20,
+    "StartPositionPercent":  75,
+    "ActivityDisplayID":  null
+}

@@ -1,0 +1,30 @@
+{
+    "id":  "my-pink-character",
+    "name":  "Pink Character",
+    "author":  "Generated from user reference",
+    "canvas_width":  512,
+    "canvas_height":  512,
+    "default_anchor":  {
+                           "x":  0.5,
+                           "y":  0.88
+                       },
+    "poses":  {
+                  "resting":  "poses/resting",
+                  "held":  "poses/held",
+                  "dialogue":  "poses/dialogue",
+                  "transition":  "poses/transition"
+              },
+    "animations":  {
+                       "walk":  {
+                                    "fps":  5,
+                                    "frames":  [
+                                                   "animations/walk/walk_01.png",
+                                                   "animations/walk/walk_02.png",
+                                                   "animations/walk/walk_03.png",
+                                                   "animations/walk/walk_04.png",
+                                                   "animations/walk/walk_05.png",
+                                                   "animations/walk/walk_06.png"
+                                               ]
+                                }
+                   }
+}

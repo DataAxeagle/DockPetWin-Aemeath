@@ -1,0 +1,65 @@
+{
+  "idle_front": {
+    "centerX": 330,
+    "bottomY": 400,
+    "width": 117,
+    "height": 177,
+    "zIndex": 10
+  },
+  "sit_bed": {
+    "centerX": 315,
+    "bottomY": 642,
+    "width": 249,
+    "height": 187,
+    "zIndex": 10
+  },
+  "sleep_bed": {
+    "centerX": 285,
+    "bottomY": 620,
+    "width": 249,
+    "height": 187,
+    "zIndex": 10
+  },
+  "study_desk": {
+    "centerX": 790,
+    "bottomY": 410,
+    "width": 216,
+    "height": 216,
+    "zIndex": 10
+  },
+  "read_sofa": {
+    "centerX": 820,
+    "bottomY": 680,
+    "width": 241,
+    "height": 193,
+    "zIndex": 10
+  },
+  "drink_tea": {
+    "centerX": 430,
+    "bottomY": 480,
+    "width": 250,
+    "height": 195,
+    "zIndex": 10
+  },
+  "play_game": {
+    "centerX": 1240,
+    "bottomY": 585,
+    "width": 241,
+    "height": 193,
+    "zIndex": 10
+  },
+  "walk_hall_left": {
+    "centerX": 690,
+    "bottomY": 760,
+    "width": 155,
+    "height": 174,
+    "zIndex": 10
+  },
+  "walk_hall_right": {
+    "centerX": 1240,
+    "bottomY": 825,
+    "width": 114,
+    "height": 174,
+    "zIndex": 10
+  }
+}

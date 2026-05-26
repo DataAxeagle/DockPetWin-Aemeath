@@ -1,0 +1,13 @@
+bin/
+obj/
+.vs/
+.vscode/
+*.user
+*.suo
+*.cache
+*.log
+artifacts/
+review/
+UserData/
+*.zip
+*.7z

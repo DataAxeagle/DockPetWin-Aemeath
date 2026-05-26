@@ -1,0 +1,44 @@
+{
+  "bed": {
+    "left": 65,
+    "top": 397,
+    "width": 500,
+    "height": 333,
+    "zIndex": 4
+  },
+  "study_desk": {
+    "left": 635,
+    "top": 153,
+    "width": 430,
+    "height": 287,
+    "zIndex": 4
+  },
+  "gaming_desk": {
+    "left": 1070,
+    "top": 265,
+    "width": 540,
+    "height": 360,
+    "zIndex": 4
+  },
+  "sofa_table": {
+    "left": 650,
+    "top": 420,
+    "width": 500,
+    "height": 333,
+    "zIndex": 4
+  },
+  "tea_table": {
+    "left": 338,
+    "top": 252,
+    "width": 335,
+    "height": 223,
+    "zIndex": 4
+  },
+  "tea_smoke": {
+    "left": 430,
+    "top": 323,
+    "width": 96,
+    "height": 96,
+    "zIndex": 12
+  }
+}

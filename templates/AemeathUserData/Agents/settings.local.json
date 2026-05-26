@@ -1,0 +1,17 @@
+{
+    "provider":  "deepseek",
+    "pet_name":  "爱弥斯",
+    "pet_identifier":  "Aemeath",
+    "user_salutation":  "漂泊者",
+    "base_url":  "https://api.deepseek.com",
+    "model":  "deepseek-v4-flash",
+    "api_key":  "",
+    "api_key_env":  "DEEPSEEK_API_KEY",
+    "search_provider":  "tavily",
+    "tavily_api_key":  "",
+    "tavily_api_key_env":  "TAVILY_API_KEY",
+    "temperature":  0.7,
+    "max_history_messages":  30,
+    "enable_tools":  true,
+    "max_tool_rounds":  8
+}

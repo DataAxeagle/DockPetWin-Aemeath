@@ -1,0 +1,158 @@
+{
+  "version": "v21-animation-01",
+  "notes": "Character frames keep consistent scale and anchors. Study page flipping is provided as a desk-object animation layer to avoid drawing page artifacts over the character hair.",
+  "characters": {
+    "sleep_breath": {
+      "fps": 6,
+      "loop": true,
+      "anchor": "bottom_center",
+      "frames": [
+        "animations/characters/sleep_breath/frame_000.png",
+        "animations/characters/sleep_breath/frame_001.png",
+        "animations/characters/sleep_breath/frame_002.png",
+        "animations/characters/sleep_breath/frame_003.png",
+        "animations/characters/sleep_breath/frame_004.png",
+        "animations/characters/sleep_breath/frame_005.png",
+        "animations/characters/sleep_breath/frame_006.png",
+        "animations/characters/sleep_breath/frame_007.png"
+      ]
+    },
+    "study_read_page": {
+      "fps": 7,
+      "loop": true,
+      "anchor": "bottom_center",
+      "frames": [
+        "animations/characters/study_read_page/frame_000.png",
+        "animations/characters/study_read_page/frame_001.png",
+        "animations/characters/study_read_page/frame_002.png",
+        "animations/characters/study_read_page/frame_003.png",
+        "animations/characters/study_read_page/frame_004.png",
+        "animations/characters/study_read_page/frame_005.png",
+        "animations/characters/study_read_page/frame_006.png",
+        "animations/characters/study_read_page/frame_007.png"
+      ]
+    },
+    "play_game_idle": {
+      "fps": 8,
+      "loop": true,
+      "anchor": "bottom_center",
+      "frames": [
+        "animations/characters/play_game_idle/frame_000.png",
+        "animations/characters/play_game_idle/frame_001.png",
+        "animations/characters/play_game_idle/frame_002.png",
+        "animations/characters/play_game_idle/frame_003.png",
+        "animations/characters/play_game_idle/frame_004.png",
+        "animations/characters/play_game_idle/frame_005.png",
+        "animations/characters/play_game_idle/frame_006.png",
+        "animations/characters/play_game_idle/frame_007.png"
+      ]
+    },
+    "play_game_happy": {
+      "fps": 10,
+      "loop": true,
+      "anchor": "bottom_center",
+      "frames": [
+        "animations/characters/play_game_happy/frame_000.png",
+        "animations/characters/play_game_happy/frame_001.png",
+        "animations/characters/play_game_happy/frame_002.png",
+        "animations/characters/play_game_happy/frame_003.png",
+        "animations/characters/play_game_happy/frame_004.png",
+        "animations/characters/play_game_happy/frame_005.png",
+        "animations/characters/play_game_happy/frame_006.png",
+        "animations/characters/play_game_happy/frame_007.png"
+      ]
+    },
+    "play_game_bad": {
+      "fps": 7,
+      "loop": true,
+      "anchor": "bottom_center",
+      "frames": [
+        "animations/characters/play_game_bad/frame_000.png",
+        "animations/characters/play_game_bad/frame_001.png",
+        "animations/characters/play_game_bad/frame_002.png",
+        "animations/characters/play_game_bad/frame_003.png",
+        "animations/characters/play_game_bad/frame_004.png",
+        "animations/characters/play_game_bad/frame_005.png",
+        "animations/characters/play_game_bad/frame_006.png",
+        "animations/characters/play_game_bad/frame_007.png"
+      ]
+    },
+    "read_sofa_idle": {
+      "fps": 7,
+      "loop": true,
+      "anchor": "bottom_center",
+      "frames": [
+        "animations/characters/read_sofa_idle/frame_000.png",
+        "animations/characters/read_sofa_idle/frame_001.png",
+        "animations/characters/read_sofa_idle/frame_002.png",
+        "animations/characters/read_sofa_idle/frame_003.png",
+        "animations/characters/read_sofa_idle/frame_004.png",
+        "animations/characters/read_sofa_idle/frame_005.png",
+        "animations/characters/read_sofa_idle/frame_006.png",
+        "animations/characters/read_sofa_idle/frame_007.png"
+      ]
+    },
+    "drink_tea_idle": {
+      "fps": 7,
+      "loop": true,
+      "anchor": "bottom_center",
+      "frames": [
+        "animations/characters/drink_tea_idle/frame_000.png",
+        "animations/characters/drink_tea_idle/frame_001.png",
+        "animations/characters/drink_tea_idle/frame_002.png",
+        "animations/characters/drink_tea_idle/frame_003.png",
+        "animations/characters/drink_tea_idle/frame_004.png",
+        "animations/characters/drink_tea_idle/frame_005.png",
+        "animations/characters/drink_tea_idle/frame_006.png",
+        "animations/characters/drink_tea_idle/frame_007.png"
+      ]
+    }
+  },
+  "objects": {
+    "gaming_station_tetris": {
+      "fps": 6,
+      "loop": true,
+      "anchor": "bottom_center",
+      "frames": [
+        "animations/objects/gaming_station_tetris/frame_000.png",
+        "animations/objects/gaming_station_tetris/frame_001.png",
+        "animations/objects/gaming_station_tetris/frame_002.png",
+        "animations/objects/gaming_station_tetris/frame_003.png",
+        "animations/objects/gaming_station_tetris/frame_004.png",
+        "animations/objects/gaming_station_tetris/frame_005.png",
+        "animations/objects/gaming_station_tetris/frame_006.png",
+        "animations/objects/gaming_station_tetris/frame_007.png",
+        "animations/objects/gaming_station_tetris/frame_008.png",
+        "animations/objects/gaming_station_tetris/frame_009.png",
+        "animations/objects/gaming_station_tetris/frame_010.png",
+        "animations/objects/gaming_station_tetris/frame_011.png"
+      ]
+    },
+    "study_desk_page_flip": {
+      "fps": 7,
+      "loop": true,
+      "anchor": "bottom_center",
+      "frames": [
+        "animations/objects/study_desk_page_flip/frame_000.png",
+        "animations/objects/study_desk_page_flip/frame_001.png",
+        "animations/objects/study_desk_page_flip/frame_002.png",
+        "animations/objects/study_desk_page_flip/frame_003.png",
+        "animations/objects/study_desk_page_flip/frame_004.png",
+        "animations/objects/study_desk_page_flip/frame_005.png",
+        "animations/objects/study_desk_page_flip/frame_006.png",
+        "animations/objects/study_desk_page_flip/frame_007.png"
+      ]
+    }
+  },
+  "recommended_state_map": {
+    "sleep_bed": "animations/characters/sleep_breath",
+    "study_desk": "animations/characters/study_read_page",
+    "play_game_idle": "animations/characters/play_game_idle",
+    "play_game_happy": "animations/characters/play_game_happy",
+    "play_game_bad": "animations/characters/play_game_bad",
+    "read_sofa": "animations/characters/read_sofa_idle",
+    "drink_tea": "animations/characters/drink_tea_idle",
+    "gaming_tv": "animations/objects/gaming_station_tetris",
+    "study_desk_object": "animations/objects/study_desk_page_flip"
+  }
+}

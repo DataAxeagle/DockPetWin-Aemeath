@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>DockPetWin</AssemblyName>
+    <Product>DockPetWin Launcher</Product>
+    <Title>DockPetWin</Title>
+    <ApplicationIcon>..\DockPetWin\Resources\App\pet-app-icon.ico</ApplicationIcon>
+  </PropertyGroup>
+</Project>

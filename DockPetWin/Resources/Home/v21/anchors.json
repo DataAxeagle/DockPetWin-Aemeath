@@ -1,0 +1,100 @@
+{
+  "version": "v4",
+  "canvas": {
+    "width": 1659,
+    "height": 948,
+    "grid": 32,
+    "micro_grid": 8,
+    "view": "isometric pixel-art room"
+  },
+  "render_policy": {
+    "required_image_tool": "Codex image_gen",
+    "manual_visible_art": "forbidden",
+    "character_scale": 0.172,
+    "allowed_post_processing": [
+      "remove chroma key",
+      "crop",
+      "slice frames",
+      "compress",
+      "compose preview",
+      "copy into app resources"
+    ]
+  },
+  "layers": {
+    "background": {
+      "z_index": 0,
+      "path": "background/empty-room-no-center-rug-generated-1659.png"
+    },
+    "objects": {
+      "z_index": 4,
+      "path": "objects/"
+    },
+    "character": {
+      "z_index": 10,
+      "path": "characters/"
+    }
+  },
+  "objects": [
+    {
+      "id": "bed",
+      "path": "objects/bed_sleep_surface.png",
+      "placement": { "left": 65, "top": 397, "width": 500, "height": 333 },
+      "zone": "left bedroom",
+      "facing": "front-right",
+      "interaction_anchor": { "center_x": 315, "bottom_y": 642 },
+      "expected_actions": ["sit_bed", "sleep_bed"],
+      "notes": "Bed contains the bed frame and bedding. Character poses may sit or lie near it but must not generate a second bed."
+    },
+    {
+      "id": "study_desk",
+      "path": "objects/study_desk_front_compact_slot.png",
+      "placement": { "left": 635, "top": 153, "width": 430, "height": 287 },
+      "zone": "upper middle study area",
+      "facing": "front-facing compact desk against the back wall",
+      "interaction_anchor": { "center_x": 850, "bottom_y": 455 },
+      "expected_actions": ["read_desk_back_anchor", "write_desk_anchor"],
+      "notes": "Character should face the desktop with back toward viewer. Do not include another desk in the character pose."
+    },
+    {
+      "id": "gaming_desk",
+      "path": "objects/gaming_station_big_screen_slot_mirror.png",
+      "placement": { "left": 1070, "top": 265, "width": 540, "height": 360 },
+      "zone": "upper right gaming area",
+      "facing": "side-facing device with open interaction slot",
+      "interaction_anchor": { "center_x": 1280, "bottom_y": 603 },
+      "expected_actions": ["play_game_anchor"],
+      "notes": "Preferred design: a large side-facing screen and console/device are shown on the left or back side, with an empty interaction slot on the right/front side. No keyboard by default because the character uses a handheld controller. Character enters the empty slot and may hold a small controller, but must not add a chair, desk, monitor, computer or game console."
+    },
+    {
+      "id": "sofa_table",
+      "path": "objects/sofa_reading_slot.png",
+      "placement": { "left": 580, "top": 402, "width": 500, "height": 333 },
+      "zone": "lower middle living area",
+      "facing": "front",
+      "interaction_anchor": { "center_x": 790, "bottom_y": 665 },
+      "expected_actions": ["read_sofa_anchor"],
+      "notes": "Character reads near the sofa table. Do not include an extra sofa or large table in the character pose."
+    },
+    {
+      "id": "tea_table",
+      "path": "objects/tea_table_slot.png",
+      "placement": { "left": 338, "top": 252, "width": 335, "height": 223 },
+      "zone": "upper left window tea area",
+      "facing": "front-left",
+      "interaction_anchor": { "center_x": 458, "bottom_y": 505 },
+      "expected_actions": ["drink_tea_anchor"],
+      "notes": "Character sits at the lower-left/front side and faces the tea table. Do not face away from the table."
+    }
+  ],
+  "character_placements": [
+    { "id": "idle_front", "center_x": 715, "bottom_y": 895, "width": 150, "height": 190, "z_index": 10 },
+    { "id": "sit_bed", "center_x": 315, "bottom_y": 730, "width": 230, "height": 245, "z_index": 10, "binds_to": "bed" },
+    { "id": "sleep_bed", "center_x": 315, "bottom_y": 642, "width": 249, "height": 187, "z_index": 10, "binds_to": "bed" },
+    { "id": "read_desk_back_anchor", "center_x": 850, "bottom_y": 455, "width": 216, "height": 216, "z_index": 10, "binds_to": "study_desk" },
+    { "id": "read_sofa_anchor", "center_x": 790, "bottom_y": 665, "width": 241, "height": 193, "z_index": 10, "binds_to": "sofa_table" },
+    { "id": "drink_tea_anchor", "center_x": 458, "bottom_y": 505, "width": 241, "height": 193, "z_index": 10, "binds_to": "tea_table" },
+    { "id": "play_game_anchor", "center_x": 1280, "bottom_y": 603, "width": 241, "height": 193, "z_index": 10, "binds_to": "gaming_desk" },
+    { "id": "walk_left", "center_x": 690, "bottom_y": 760, "width": 145, "height": 170, "z_index": 10 },
+    { "id": "walk_right", "center_x": 1240, "bottom_y": 825, "width": 145, "height": 170, "z_index": 10 }
+  ]
+}
