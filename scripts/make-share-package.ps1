@@ -117,16 +117,14 @@ function New-CleanUserData {
     $sourceAgents = Join-Path $repoRoot "DockPetWin\bin\Debug\net8.0-windows\UserData\Agents"
     $sourceUserData = Join-Path $repoRoot "DockPetWin\bin\Debug\net8.0-windows\UserData"
     $templateUserData = Join-Path $repoRoot "templates\AemeathUserData"
-    $templateAgents = Join-Path $templateUserData "Agents"
-    if (!(Test-Path -LiteralPath $sourceAgents) -and (Test-Path -LiteralPath $templateAgents)) {
-        $sourceAgents = $templateAgents
-    }
-    if (!(Test-Path -LiteralPath $sourceUserData) -and (Test-Path -LiteralPath $templateUserData)) {
-        $sourceUserData = $templateUserData
-    }
     $userDataRoot = Join-Path $DestinationRoot "UserData"
     $agentsRoot = Join-Path $userDataRoot "Agents"
     $workspaceRoot = Join-Path $agentsRoot "workspace"
+
+    if (!(Test-Path -LiteralPath $sourceAgents) -and (Test-Path -LiteralPath $templateUserData)) {
+        Copy-PublicDirectory -Source $templateUserData -Destination $userDataRoot
+        return
+    }
 
     New-Item -ItemType Directory -Force -Path $agentsRoot | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $agentsRoot "conversations") | Out-Null

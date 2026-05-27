@@ -28,12 +28,16 @@
                 CornerRadius="8"
                 Visibility="Collapsed">
             <StackPanel>
-                <TextBlock x:Name="BubbleText"
-                           TextWrapping="Wrap"
-                           TextAlignment="Center"
-                           Foreground="#302A36"
-                           FontFamily="Microsoft YaHei UI"
-                           FontSize="13" />
+                <ScrollViewer x:Name="BubbleTextScrollViewer"
+                              MaxHeight="220"
+                              VerticalScrollBarVisibility="Auto">
+                    <TextBlock x:Name="BubbleText"
+                               TextWrapping="Wrap"
+                               TextAlignment="Center"
+                               Foreground="#302A36"
+                               FontFamily="Microsoft YaHei UI"
+                               FontSize="13" />
+                </ScrollViewer>
                 <Image x:Name="BubbleImage"
                        Width="96"
                        Height="96"

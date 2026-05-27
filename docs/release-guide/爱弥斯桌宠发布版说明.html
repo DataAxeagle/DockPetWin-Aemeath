@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>爱弥斯桌宠发布版说明</title>
+  <style>
+    :root {
+      --bg: #fff8fb;
+      --ink: #2f2430;
+      --muted: #746276;
+      --line: #ead4df;
+      --pink: #d94f91;
+      --blue: #4b82c4;
+      --panel: #ffffff;
+      --soft: #f8e7ef;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", Arial, sans-serif;
+      line-height: 1.7;
+    }
+    .wrap { max-width: 1040px; margin: 0 auto; padding: 36px 24px 56px; }
+    header {
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      gap: 28px;
+      align-items: center;
+      padding: 28px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+    }
+    header img { width: 150px; height: auto; image-rendering: auto; }
+    h1 { margin: 0 0 8px; font-size: 34px; line-height: 1.2; }
+    h2 { margin: 34px 0 12px; font-size: 24px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+    h3 { margin: 20px 0 8px; font-size: 18px; }
+    p { margin: 8px 0; }
+    a { color: var(--blue); }
+    code {
+      padding: 2px 6px;
+      background: #f3edf3;
+      border-radius: 6px;
+      font-family: Consolas, Menlo, monospace;
+      font-size: 0.94em;
+    }
+    pre {
+      margin: 10px 0;
+      padding: 12px 14px;
+      background: #2b2430;
+      color: #fff;
+      border-radius: 12px;
+      overflow-x: auto;
+    }
+    pre code { background: transparent; color: inherit; padding: 0; }
+    .muted { color: var(--muted); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px;
+    }
+    .tag {
+      display: inline-block;
+      margin: 0 8px 8px 0;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--soft);
+      color: var(--pink);
+      font-size: 13px;
+      font-weight: 700;
+    }
+    table { width: 100%; border-collapse: collapse; background: var(--panel); }
+    th, td { border: 1px solid var(--line); padding: 10px 12px; text-align: left; vertical-align: top; }
+    th { background: var(--soft); }
+    ul, ol { padding-left: 22px; }
+    .hero-note { font-size: 17px; color: var(--muted); }
+    @media (max-width: 720px) {
+      header { grid-template-columns: 1fr; }
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <img src="assets/aemeath-stand.png" alt="爱弥斯桌宠立绘" />
+      <div>
+        <h1>爱弥斯桌宠发布版说明</h1>
+        <p class="hero-note">Windows 主版本与 macOS 移植版的下载、启动、API 配置和更新说明。</p>
+        <span class="tag">Windows</span>
+        <span class="tag">macOS</span>
+        <span class="tag">Aemeath</span>
+        <span class="tag">UserData 保留</span>
+      </div>
+    </header>
+
+    <h2>项目简介</h2>
+    <p>DockPetWin / DockPetMac Aemeath 是一个爱弥斯主题桌面陪伴应用。爱弥斯来自《鸣潮》相关角色与世界观，本项目是非官方同人分享版本，内置整理过的人设、关系、台词风格和世界观资料，用于让 AI 对话更贴近角色。</p>
+    <p>发布包不包含作者本地 API、私人聊天记录、私人记忆或个人称呼。新用户默认称呼为“漂泊者”，可在设置中自行调整。</p>
+
+    <h2>下载哪个包</h2>
+    <table>
+      <tr><th>系统</th><th>下载文件</th><th>说明</th></tr>
+      <tr><td>Windows</td><td><code>DockPetWin-Aemeath-Windows-v2026.05.27.zip</code></td><td>完整主版本，解压后运行 <code>DockPetWin.exe</code>。</td></tr>
+      <tr><td>macOS</td><td><code>DockPetMac-Aemeath-v2026.05.27.zip</code></td><td>macOS 移植版，解压后运行 <code>DockPetMac.app</code>，并让同级 <code>UserData</code> 保持在一起。</td></tr>
+      <tr><td>开发者</td><td><code>DockPetWin-Aemeath-source-2026-05-27.zip</code></td><td>源码包，包含 Windows 主项目和 macOS 移植工程，不包含个人运行数据。</td></tr>
+    </table>
+
+    <h2>第一次启动</h2>
+    <div class="grid">
+      <section class="card">
+        <h3>Windows</h3>
+        <ol>
+          <li>完整解压 Windows zip。</li>
+          <li>双击 <code>DockPetWin.exe</code>。</li>
+          <li>如果 SmartScreen 提示未知发布者，确认来源可信后继续运行。</li>
+          <li>需要 AI 对话时，在设置中填写 DeepSeek API。</li>
+        </ol>
+      </section>
+      <section class="card">
+        <h3>macOS</h3>
+        <ol>
+          <li>完整解压 macOS zip。</li>
+          <li>右键 <code>DockPetMac.app</code>，选择“打开”。</li>
+          <li>首次安全提示中确认打开。</li>
+          <li>如果仍无法打开，在终端执行下方命令。</li>
+        </ol>
+        <pre><code>xattr -dr com.apple.quarantine /path/to/DockPetMac.app</code></pre>
+      </section>
+    </div>
+
+    <h2>API 配置</h2>
+    <p>不填写 API 时，基础桌宠显示、设置、部分本地资源和说明仍可使用；AI 对话、长期记忆提取、联网搜索等需要 API。</p>
+    <ul>
+      <li>DeepSeek API：<a href="https://platform.deepseek.com/usage">https://platform.deepseek.com/usage</a></li>
+      <li>Tavily 新闻/联网搜索 API：<a href="https://app.tavily.com/home">https://app.tavily.com/home</a></li>
+    </ul>
+
+    <h2>更新并保留 UserData</h2>
+    <p><code>UserData</code> 是本地数据目录，保存 API、称呼、聊天记录、长期记忆、小屋配置、提醒和资源选择。更新软件时不要直接丢掉它。</p>
+    <ol>
+      <li>退出正在运行的桌宠。</li>
+      <li>备份旧版本文件夹里的 <code>UserData</code>。</li>
+      <li>解压新版到新文件夹。</li>
+      <li>把旧版 <code>UserData</code> 复制到新版文件夹。</li>
+      <li>Windows 运行 <code>DockPetWin.exe</code>；macOS 运行 <code>DockPetMac.app</code>。</li>
+    </ol>
+
+    <h2>macOS 当前状态</h2>
+    <p>macOS 版已经使用新的 <code>DockPetMac.app</code> 发布包，并内置干净的爱弥斯 UserData 模板。它会尽量和 Windows 版共用角色、人设、资源与配置结构。</p>
+    <p>由于平台差异，窗口置顶、菜单栏、安全权限、多屏位置、Dock 行为等细节仍可能与 Windows 版不完全一致。遇到问题时，建议在反馈中说明 Mac 型号、芯片、macOS 版本、打开方式和报错截图。</p>
+
+    <h2>隐私说明</h2>
+    <p>发布包不会携带作者的 API key、私人聊天记录、私人长期记忆或个人称呼。你填写的 API 和聊天数据默认保存在本机 <code>UserData</code> 中。使用 AI 对话或联网搜索时，相关内容会发送给你自己配置的 API 服务。</p>
+  </main>
+</body>
+</html>

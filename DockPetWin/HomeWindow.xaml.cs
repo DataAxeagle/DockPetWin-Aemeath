@@ -1478,7 +1478,6 @@ public partial class HomeWindow : Window
     {
         var poses = new Dictionary<string, ImageSource>(StringComparer.OrdinalIgnoreCase);
         LoadHomePosesFromDirectory(Path.Combine(LegacyHomeResourceDirectory(), "characters"), poses);
-        LoadHomePosesFromDirectory(Path.Combine(AppContext.BaseDirectory, "Resources", "Home", "aemeath"), poses, overwrite: false);
         LoadHomePosesFromDirectory(Path.Combine(HomeResourceDirectory(), "characters"), poses);
         return poses;
     }
@@ -1527,7 +1526,6 @@ public partial class HomeWindow : Window
     {
         var frames = new Dictionary<string, IReadOnlyList<ImageSource>>(StringComparer.OrdinalIgnoreCase);
         LoadHomePoseFramesFromDirectory(Path.Combine(LegacyHomeResourceDirectory(), "characters"), frames);
-        LoadHomePoseFramesFromDirectory(Path.Combine(AppContext.BaseDirectory, "Resources", "Home", "aemeath"), frames, overwrite: false);
         LoadHomePoseFramesFromDirectory(Path.Combine(HomeResourceDirectory(), "characters"), frames);
 
         AddAnimationFrames(frames, "sleep_bed_anchor_slot", "animations", "characters", "sleep_breath");

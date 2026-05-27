@@ -2,22 +2,23 @@
   <img src="docs/images/aemeath-stand.png" width="180" alt="Aemeath" />
 </p>
 
-<h1 align="center">DockPetWin Aemeath</h1>
+<h1 align="center">DockPetWin / DockPetMac Aemeath</h1>
 
 <p align="center">
-  让爱弥斯住进 Windows 桌面边缘，也住进自己的小屋。
+  让爱弥斯住进 PC 桌面，也住进自己的小屋。
 </p>
 
 <p align="center">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-10%20%2F%2011-4f8cc9" />
+  <img alt="macOS" src="https://img.shields.io/badge/macOS-port-6e7bd9" />
   <img alt=".NET" src="https://img.shields.io/badge/.NET-8.0-7b55c7" />
   <img alt="License" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-dc6b9a" />
   <img alt="Aemeath" src="https://img.shields.io/badge/character-Aemeath-f3a4c8" />
 </p>
 
-DockPetWin Aemeath 是一个 Windows 桌面陪伴应用。爱弥斯会在桌面边缘休息、散步、回应提醒、和你聊天，也会在小屋里按行事历生活。
+DockPetWin / DockPetMac Aemeath 是一个桌面陪伴应用，当前发布包同时提供 Windows 主版本和 macOS 移植版本。爱弥斯会在桌面边缘休息、散步、回应提醒、和你聊天，也会在小屋里按行事历生活。
 
-本项目基于 [DockCat](https://github.com/Auwuua/DockCat) 的桌宠概念与 Windows 移植版本继续开发，并加入了爱弥斯角色、人设资料、小屋系统、AI 对话、长期记忆和提醒任务。
+本项目基于 [DockCat](https://github.com/Auwuua/DockCat) 的桌宠概念与 Windows 移植版本继续开发，并加入了爱弥斯角色、人设资料、小屋系统、AI 对话、长期记忆和提醒任务。macOS 版是基于同一套爱弥斯资料、资源和干净 UserData 模板迁移出来的版本，应用名为 `DockPetMac.app`。
 
 内置角色“爱弥斯”是基于《鸣潮》相关角色与世界观制作的非官方同人桌宠版本。为了尽量还原她的口吻、关系感和拉海洛 / 索拉里斯相关背景，项目内置整理了约 69 个角色与世界观文本文件，合计约 63 万字符资料，用于 AI 对话时检索、约束人设和补充背景。
 
@@ -32,7 +33,9 @@ DockPetWin Aemeath 是一个 Windows 桌面陪伴应用。爱弥斯会在桌面�
 
 ## 快速使用
 
-推荐下载发布页中的便携版压缩包。
+推荐下载发布页中的平台压缩包。普通用户只需要下载自己系统对应的 release，不需要下载源码包。
+
+### Windows
 
 1. 下载最新的 DockPetWin Aemeath 压缩包。
 2. 完整解压到桌面、下载、文档等当前用户有写入权限的位置。
@@ -41,6 +44,18 @@ DockPetWin Aemeath 是一个 Windows 桌面陪伴应用。爱弥斯会在桌面�
 5. 第一次使用 AI 聊天时，根据爱弥斯的提示进入设置页填写 DeepSeek API Key。
 
 不要把软件放进 `Program Files` 这类通常需要管理员权限的目录。DockPetWin 会在程序同目录写入 `UserData`，目录无写入权限会导致设置或记忆保存失败。
+
+### macOS
+
+发布页中的 macOS 包为 `DockPetMac-Aemeath-*.zip`。解压后会看到 `DockPetMac.app` 和同级 `UserData`，请尽量保持它们在同一个文件夹内运行。这个版本已经带有爱弥斯资源、人设知识库、默认称呼“漂泊者”和 API 配置模板。
+
+macOS 版目前没有 Apple Developer ID 签名和公证。如果系统提示“无法打开”或“来自未认证开发者”，可以右键 `DockPetMac.app` 选择“打开”，首次确认一次；如果仍被 Gatekeeper 拦截，可在确认来源可信后，对解压出的应用执行：
+
+```bash
+xattr -dr com.apple.quarantine /path/to/DockPetMac.app
+```
+
+macOS 版是移植版，核心角色、素材、AI 配置和本地 UserData 结构会尽量与 Windows 版保持一致，但窗口置顶、菜单栏、系统权限、多屏位置等平台细节仍可能和 Windows 主版本存在差异。
 
 ## 功能
 
@@ -80,10 +95,10 @@ DockPetWin Aemeath 是一个 Windows 桌面陪伴应用。爱弥斯会在桌面�
 
 压缩包不会包含任何人的 API Key。新用户需要在设置里自行填写：
 
-- `DeepSeek API Key`：用于爱弥斯的 AI 对话。申请和用量管理入口：[DeepSeek Platform](https://platform.deepseek.com/usage)。
+- `DeepSeek API Key`：用于爱弥斯的 AI 对话。申请地址：[https://platform.deepseek.com/usage](https://platform.deepseek.com/usage)
 - `API Base URL`：默认使用 DeepSeek 兼容地址；如果你使用兼容服务，可以按服务商说明修改。
 - `Model`：填写要调用的模型名。
-- `Tavily API Key`：可选，用于联网搜索任务。不填写也能正常进行普通对话。申请入口：[Tavily](https://app.tavily.com/home)。
+- `Tavily API Key`：可选，用于联网搜索任务。不填写也能正常进行普通对话。申请地址：[https://app.tavily.com/home](https://app.tavily.com/home)
 
 ## 更新版本并保留 UserData
 
@@ -98,11 +113,11 @@ DockPetWin Aemeath 是一个 Windows 桌面陪伴应用。爱弥斯会在桌面�
 
 推荐更新方式：
 
-1. 先从托盘菜单退出 DockPetWin。
+1. 先从菜单退出正在运行的桌宠。
 2. 复制旧版本文件夹中的 `UserData` 做备份。
 3. 解压新版到一个新文件夹。
 4. 把旧版本的 `UserData` 复制到新版文件夹中。
-5. 运行新版 `DockPetWin.exe`。
+5. Windows 运行新版 `DockPetWin.exe`；macOS 运行新版 `DockPetMac.app`。
 
 如果拿到的是不含 `UserData` 的更新包，也可以直接覆盖旧程序文件；覆盖前仍建议备份一次 `UserData`。只有想恢复全新初始状态时，才删除或重命名 `UserData`。
 
@@ -155,6 +170,8 @@ dotnet build .\DockPetWin\DockPetWin.csproj
 
 分享包会生成自包含 Windows 可执行文件，并创建干净的首次使用 `UserData`：保留爱弥斯人设、世界观、必要技能和角色资源，但不包含个人聊天记录、个人称呼、私有记忆或 API Key。
 
+macOS 移植源码位于源码包的 `macos/` 目录。如果你要参与 macOS 适配，建议优先从窗口置顶、菜单栏行为、权限提示、多屏位置和资源路径兼容性开始排查。
+
 ## 项目结构
 
 ```text
@@ -166,7 +183,7 @@ DockPetWin-main
 ├─ Launcher                # 启动器项目
 ├─ docs/images             # README 展示图片
 ├─ scripts                 # 构建、发布、分享包脚本
-├─ templates/AemeathUserData # 干净的爱弥斯首次启动资料模板
+├─ macos                   # macOS 移植版源码，源码包中提供
 ├─ README.md
 ├─ ASSET_PACK_GUIDE.md
 └─ LICENSE

@@ -19,6 +19,7 @@ using DockPetWin.Core.Statistics;
 using DockPetWin.Platform;
 using DockPetWin.UI.PetWindow;
 using DockPetWin.UI.Tray;
+using WpfPoint = System.Windows.Point;
 
 namespace DockPetWin;
 
@@ -1261,8 +1262,11 @@ public partial class MainWindow : Window
         }
 
         BubbleBorder.Visibility = Visibility.Visible;
+        BubbleTextScrollViewer.MaxHeight = MaxBubbleTextHeightFor(anchor, image is not null, showInput, actions.Length);
         RootLayout.UpdateLayout();
-        petWindow.SetExtraTopContent(Math.Max(280, BubbleBorder.ActualWidth), BubbleBorder.ActualHeight + 8);
+        var maxExtraTopHeight = MaxExtraTopHeightFor(anchor);
+        var extraTopHeight = Math.Min(BubbleBorder.ActualHeight + 8, maxExtraTopHeight);
+        petWindow.SetExtraTopContent(Math.Max(280, BubbleBorder.ActualWidth), extraTopHeight);
         petWindow.SetAnchor(activityArea.ClampAnchor(anchor, petWindow.PetSize), activityArea.Edge);
     }
 
@@ -1281,8 +1285,37 @@ public partial class MainWindow : Window
         BubbleImage.Visibility = Visibility.Collapsed;
         BubbleInputPanel.Visibility = Visibility.Collapsed;
         BubbleButtons.Children.Clear();
+        BubbleTextScrollViewer.MaxHeight = 220;
         petWindow.SetExtraTopContent(0, 0);
         petWindow.SetAnchor(activityArea.ClampAnchor(anchor, petWindow.PetSize), activityArea.Edge);
+    }
+
+    private double MaxBubbleTextHeightFor(WpfPoint anchor, bool hasImage, bool hasInput, int actionCount)
+    {
+        var maxExtraTopHeight = MaxExtraTopHeightFor(anchor);
+        var reservedHeight = 48d;
+        if (hasImage)
+        {
+            reservedHeight += 104d;
+        }
+
+        if (hasInput)
+        {
+            reservedHeight += 32d;
+        }
+
+        if (actionCount > 0)
+        {
+            reservedHeight += 40d;
+        }
+
+        return Math.Clamp(maxExtraTopHeight - reservedHeight, 72d, 220d);
+    }
+
+    private double MaxExtraTopHeightFor(WpfPoint anchor)
+    {
+        var availableAbovePet = anchor.Y - activityArea.Screen.Top - petWindow.PetSize.Height - 8;
+        return Math.Max(0, availableAbovePet);
     }
 
     private void ToggleVisibilityFromTray()

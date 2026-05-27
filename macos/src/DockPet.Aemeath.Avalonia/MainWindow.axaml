@@ -1,0 +1,74 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        x:Class="DockPet.Aemeath.Avalonia.MainWindow"
+        x:CompileBindings="False"
+        Width="340"
+        Height="430"
+        MinWidth="340"
+        MinHeight="430"
+        CanResize="False"
+        WindowDecorations="None"
+        ExtendClientAreaToDecorationsHint="True"
+        TransparencyLevelHint="Transparent"
+        Background="Transparent"
+        Topmost="True"
+        ShowInTaskbar="False"
+        Title="DockPetWin Aemeath">
+    <Grid PointerPressed="OnShellPointerPressed">
+        <Grid.ContextMenu>
+            <ContextMenu>
+                <MenuItem Header="和爱弥斯聊天" Click="OnChatClick" />
+                <MenuItem Header="打开小屋" Click="OnHomeClick" />
+                <MenuItem Header="设置 API" Click="OnSettingsClick" />
+                <Separator />
+                <MenuItem Header="重启桌宠" Click="OnRestartClick" />
+                <MenuItem Header="退出" Click="OnExitClick" />
+            </ContextMenu>
+        </Grid.ContextMenu>
+
+        <Grid RowDefinitions="Auto,*" Margin="8">
+            <Border Grid.Row="0"
+                    Margin="10,0,10,8"
+                    Padding="14,10"
+                    CornerRadius="12"
+                    Background="#FDF6FB"
+                    BorderBrush="#C85C98"
+                    BorderThickness="1.5">
+                <StackPanel Spacing="4">
+                    <TextBlock Text="{Binding BubbleTitle}"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               Foreground="#7B2D5B" />
+                    <TextBlock Text="{Binding BubbleText}"
+                               FontSize="12"
+                               Foreground="#3E2635"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
+            <Grid Grid.Row="1">
+                <Image Source="avares://DockPet.Aemeath.Avalonia/Assets/Images/aemeath-stand.png"
+                       Width="250"
+                       Height="250"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Bottom"
+                       Stretch="Uniform" />
+                <Border HorizontalAlignment="Center"
+                        VerticalAlignment="Bottom"
+                        Margin="0,0,0,4"
+                        Padding="12,6"
+                        CornerRadius="10"
+                        Background="#E94C9A"
+                        Opacity="0.92">
+                    <TextBlock Text="{Binding StatusLine}"
+                               Foreground="White"
+                               FontSize="12"
+                               FontWeight="SemiBold" />
+                </Border>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>
