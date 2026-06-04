@@ -1,6 +1,8 @@
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Diagnostics;
+using System.Text.RegularExpressions;
 using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
@@ -11,16 +13,21 @@ namespace DockPetWin.Core.Agents;
 public sealed class AgentToolRunner
 {
     private readonly AgentStore store;
+    private ActiveSkillContext? activeSkill;
+    private int toolStep;
     private static readonly JsonSerializerOptions ResultJsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
         WriteIndented = true
     };
+    private const int MaxSkillDiscoveryDepth = 8;
 
     public AgentToolRunner(AgentStore store)
     {
         this.store = store;
     }
+
+    public bool HasActiveSkill => activeSkill is not null;
 
     public static bool TryParseToolCall(string text, out AgentToolCall call)
     {
@@ -101,13 +108,17 @@ public sealed class AgentToolRunner
     public AgentToolResult Run(AgentToolCall call)
     {
         var tool = call.Tool.Trim().ToLowerInvariant();
+        toolStep++;
         try
         {
             return tool switch
             {
                 "tool_specs" => ToolSpecs(),
                 "list_skills" or "list_skill" or "search_skills" or "skill_search" => ListSkills(GetArg(call, "query")),
-                "read_skill" or "readskill" or "skill_read" or "invoke_skill" or "use_skill" or "call_skill" => ReadSkill(GetFirstArg(call, "name", "skill", "skill_name", "skillName", "query")),
+                "read_skill" or "readskill" or "skill_read" or "load_skill" or "invoke_skill" or "use_skill" or "call_skill" => ReadSkill(GetFirstArg(call, "name", "skill", "skill_name", "skillName", "query")),
+                "list_skill_files" or "skill_files" or "skill_file_list" => ListSkillFiles(GetFirstArg(call, "path", "directory", "dir")),
+                "find_skill_files" or "find_skill_file" or "skill_file_search" => FindSkillFiles(GetFirstArg(call, "query", "name", "filename", "file", "path"), GetFirstArg(call, "path", "directory", "dir")),
+                "read_skill_file" or "skill_file_read" => ReadSkillFile(GetFirstArg(call, "path", "file", "name"), ParseInt(GetFirstArg(call, "max_chars", "maxChars", "limit"), 12000)),
                 "list_memories" or "list_memory" or "memory_list" => ListMemories(GetFirstArg(call, "type", "scope", "kind")),
                 "read_memory" or "read_memories" or "memory_read" => ReadMemory(GetFirstArg(call, "type", "scope", "kind"), ParseInt(GetFirstArg(call, "max_chars", "maxChars", "limit"), 12000)),
                 "save_memory" or "memory_save" or "remember" => SaveMemory(call),
@@ -128,9 +139,13 @@ public sealed class AgentToolRunner
                     ParseInt(GetArg(call, "offset"), 0),
                     ParseInt(GetFirstArg(call, "max_chars", "maxChars", "limit"), 4000)),
                 "write_file" => WriteFile(GetArg(call, "path"), GetArg(call, "content")),
+                "python_execute" or "run_python" or "python" => PythonExecute(
+                    GetFirstArg(call, "code", "script", "python"),
+                    GetFirstArg(call, "path", "file", "script_path"),
+                    ParseInt(GetFirstArg(call, "timeout_seconds", "timeoutSeconds", "timeout"), 30)),
                 "list_reminders" or "reminder_list" => ListReminders(),
                 "upsert_reminder" or "save_reminder" or "create_reminder" or "edit_reminder" => UpsertReminder(call),
-                "delete_reminder" or "remove_reminder" => DeleteReminder(GetFirstArg(call, "id", "name", "title")),
+                "delete_reminder" or "remove_reminder" => AgentToolResult.Error("delete_reminder", "delete_disabled", "Startup Permission Hook 已禁用删除权限。请到设置界面手动删除提醒，或让爱弥斯创建整理清单。"),
                 "list_task_runs" or "list_scheduled_runs" or "task_run_list" => ListTaskRuns(ParseInt(GetFirstArg(call, "limit", "max"), 20)),
                 "read_task_run" or "read_scheduled_run" or "task_run_read" => ReadTaskRun(GetFirstArg(call, "path", "file", "output_path")),
                 "create_task" => CreateTask(
@@ -149,6 +164,137 @@ public sealed class AgentToolRunner
     public string RunText(AgentToolCall call)
     {
         return FormatResult(Run(call));
+    }
+
+    public AgentToolResult? TryAutoLoadSkillForMessage(string userMessage)
+    {
+        var route = FindSkillRoute(userMessage);
+        if (route is null)
+        {
+            return null;
+        }
+
+        return ReadSkill(route.Value.Name, $"Skill runtime 根据用户请求自动路由：{route.Value.Reason}");
+    }
+
+    public bool TryBuildSkillComplianceNudge(out string nudge)
+    {
+        nudge = "";
+        if (activeSkill is null)
+        {
+            return false;
+        }
+
+        var missingStartup = activeSkill.GetMissingStartupFiles()
+            .Take(5)
+            .ToList();
+        if (missingStartup.Count > 0)
+        {
+            nudge = "Skill runtime gate 检查到当前已激活 skill `" + activeSkill.Name + "`，但启动阶段文件还没有读取。"
+                + Environment.NewLine
+                + "必须先调用 `read_skill_file` 读取这些 startup 文件，再继续后续步骤："
+                + Environment.NewLine
+                + string.Join(Environment.NewLine, missingStartup.Select(path => $"- {path}"));
+            return true;
+        }
+
+        var missingRequired = activeSkill.GetMissingRequiredFiles()
+            .Take(5)
+            .ToList();
+        if (missingRequired.Count == 0)
+        {
+            if (activeSkill.RequiresIndexSelectedFile && !activeSkill.HasReadIndexSelectedContentFile())
+            {
+                nudge = "Skill runtime gate 检查到当前 skill 要求先读索引并根据索引选择对应资料，但还没有读取任何索引指向的具体内容文件。"
+                    + Environment.NewLine
+                    + "请先根据已读取的 index/索引内容，使用 `find_skill_files` 或 `read_skill_file` 读取本次任务对应的资料文件，再继续最终答复。"
+                    + (string.IsNullOrWhiteSpace(activeSkill.IndexSelectionReason) ? "" : Environment.NewLine + "触发原因：" + activeSkill.IndexSelectionReason);
+                return true;
+            }
+
+            var staleFinalReview = activeSkill.GetMissingOrStaleFinalReviewFiles()
+                .Take(5)
+                .ToList();
+            if (staleFinalReview.Count == 0)
+            {
+                return false;
+            }
+
+            nudge = "Skill runtime gate 检查到当前 skill 要求最终输出前复读规范，但这些 final review 文件尚未读取，或读取时间早于后续资料读取。"
+                + Environment.NewLine
+                + "请现在重新调用 `read_skill_file` 读取这些文件，然后再给最终答复："
+                + Environment.NewLine
+                + string.Join(Environment.NewLine, staleFinalReview.Select(path => $"- {path}"));
+            return true;
+        }
+
+        nudge = "Skill runtime 检查到当前已激活 skill `" + activeSkill.Name + "`，但还有 SKILL.md 标记的必读资料没有读取。"
+            + Environment.NewLine
+            + "请先调用 `read_skill_file` 读取这些路径，再继续最终答复："
+            + Environment.NewLine
+            + string.Join(Environment.NewLine, missingRequired.Select(path => $"- {path}"));
+        return true;
+    }
+
+    public string BuildActiveSkillRuntimePrompt()
+    {
+        if (activeSkill is null)
+        {
+            return "";
+        }
+
+        var required = activeSkill.RequiredFiles.Count == 0
+            ? "- 无显式必读文件。"
+            : string.Join(Environment.NewLine, activeSkill.RequiredFiles.Select(path => $"- {path}"));
+        var suggested = activeSkill.SuggestedFiles.Count == 0
+            ? "- 无额外建议文件。"
+            : string.Join(Environment.NewLine, activeSkill.SuggestedFiles.Take(12).Select(path => $"- {path}"));
+        var startup = activeSkill.StartupFiles.Count == 0
+            ? "- 无 startup gate。"
+            : string.Join(Environment.NewLine, activeSkill.StartupFiles.Select(path => $"- {path}"));
+        var finalReview = activeSkill.FinalReviewFiles.Count == 0
+            ? "- 无 final review gate。"
+            : string.Join(Environment.NewLine, activeSkill.FinalReviewFiles.Select(path => $"- {path}"));
+        var readFiles = activeSkill.ReadFiles.Count == 0
+            ? "- 本轮尚未读取 skill-local 文件。"
+            : string.Join(Environment.NewLine, activeSkill.ReadFiles.Order(StringComparer.OrdinalIgnoreCase).Take(20).Select(path => $"- {path}"));
+        var indexGate = activeSkill.RequiresIndexSelectedFile
+            ? $"- enabled: true{Environment.NewLine}- rule: 读完 index 后，必须继续读取至少一个 index 指向的具体内容文件。"
+            : "- enabled: false";
+
+        return $"""
+        # Skill Runtime State
+
+        - active_skill: {activeSkill.Name}
+        - skill_root: `{GetRelativeWorkspacePath(activeSkill.RootPath)}`
+        - rule: 当前请求已自动进入 skill runtime。后续相对路径默认以 active skill root 解析。
+        - read_tool: 读取当前 skill 自带资料时，优先使用 `read_skill_file`；列目录用 `list_skill_files`；查找用 `find_skill_files`。
+        - gate_rule: 没有通过 startup、required、index-selected-content、final-review gates 前，不要给最终答复。
+
+        ## Startup Gate Files
+
+        {startup}
+
+        ## Required Skill Files
+
+        {required}
+
+        ## Index Selected Content Gate
+
+        {indexGate}
+
+        ## Final Review Gate Files
+
+        {finalReview}
+
+        ## Suggested Skill Files
+
+        {suggested}
+
+        ## Skill Files Read In This Turn
+
+        {readFiles}
+        """;
     }
 
     public static string FormatResult(AgentToolResult result)
@@ -241,8 +387,40 @@ public sealed class AgentToolRunner
             new AgentToolSpec
             {
                 Name = "read_skill",
-                Description = "读取并激活指定 skill 的 SKILL.md。用户说调用、使用、执行某个 skill 时，先用 list_skills 找到名称，再用 read_skill 读取，然后按 SKILL.md 指令继续回答或操作。",
+                Description = "读取并激活指定 skill 的 SKILL.md。用户说调用、使用、执行某个 skill 时，先用 list_skills 找到名称，再用 read_skill 读取，然后按 SKILL.md 指令继续回答或操作。别名 load_skill 也可用。",
                 Arguments = new() { ["name"] = "必填。skill 目录名，例如 desktop-memory。" },
+                ReturnsHandle = true,
+                WriteAccess = false
+            },
+            new AgentToolSpec
+            {
+                Name = "list_skill_files",
+                Description = "列出当前已激活 skill 目录内的文件。读取 skill 自带 knowledge/references/rules/assets/templates 时优先用它，不要混用桌宠人设 knowledge。",
+                Arguments = new() { ["path"] = "可选。当前 skill 内相对路径，例如 knowledge 或 references。" },
+                ReturnsHandle = true,
+                WriteAccess = false
+            },
+            new AgentToolSpec
+            {
+                Name = "find_skill_files",
+                Description = "在当前已激活 skill 目录内递归查找文件或文件夹。用于根据 SKILL.md 的路径提示找到 skill-local 资料。",
+                Arguments = new()
+                {
+                    ["query"] = "必填。文件名或路径关键词，例如 checklist.md、deal、knowledge。",
+                    ["path"] = "可选。当前 skill 内限定搜索目录，例如 knowledge。"
+                },
+                ReturnsHandle = true,
+                WriteAccess = false
+            },
+            new AgentToolSpec
+            {
+                Name = "read_skill_file",
+                Description = "读取当前已激活 skill 目录内的文本资料，并记录为已读。SKILL.md 提到 knowledge/、references/、rules/、schemas/、checklist.md 等相对路径时优先使用。",
+                Arguments = new()
+                {
+                    ["path"] = "必填。当前 skill 内相对路径，例如 knowledge/index.md、references/schema.md、checklist.md。",
+                    ["max_chars"] = "可选。最多读取字符数，默认 12000。"
+                },
                 ReturnsHandle = true,
                 WriteAccess = false
             },
@@ -358,13 +536,26 @@ public sealed class AgentToolRunner
             new AgentToolSpec
             {
                 Name = "write_file",
-                Description = "写入 UserData/Agents 内的文本文件。",
+                Description = "写入 workspace/** 或 default-agent.md。受 Startup Permission Hook 限制，不能写入其他 Agents 目录。",
                 Arguments = new()
                 {
-                    ["path"] = "可选。相对路径；为空则写入 workspace/output/桌宠笔记-时间.md。",
+                    ["path"] = "可选。相对路径；为空则写入 workspace/output/notes/YYYY-MM-DD/桌宠笔记-时间.md。允许 workspace/** 或 default-agent.md。",
                     ["content"] = "必填。要写入的文本内容。"
                 },
                 ReturnsHandle = false,
+                WriteAccess = true
+            },
+            new AgentToolSpec
+            {
+                Name = "python_execute",
+                Description = "在 workspace 内执行受限 Python。用于简单数据处理、整理 output、生成/修改 CSV/XLSX/DOCX。文件访问限制在 workspace 内，禁用删除、子进程和网络。",
+                Arguments = new()
+                {
+                    ["code"] = "可选。要执行的 Python 代码。可导入 scripts/aemeath_tools.py 中的 create_xlsx/create_docx/write_csv 等工具。",
+                    ["path"] = "可选。workspace 内已有 .py 脚本路径。code 为空时读取这个脚本。",
+                    ["timeout_seconds"] = "可选。超时秒数，默认 30，最大 120。"
+                },
+                ReturnsHandle = true,
                 WriteAccess = true
             },
             new AgentToolSpec
@@ -404,10 +595,10 @@ public sealed class AgentToolRunner
             new AgentToolSpec
             {
                 Name = "delete_reminder",
-                Description = "删除桌宠提醒事项。用户要求删除某个提醒时使用。",
+                Description = "已禁用。Startup Permission Hook 禁止爱弥斯执行删除操作；需要删除提醒请让用户到设置界面手动处理。",
                 Arguments = new() { ["id"] = "必填。提醒 ID、名称或类型。" },
                 ReturnsHandle = false,
-                WriteAccess = true
+                WriteAccess = false
             },
             new AgentToolSpec
             {
@@ -526,32 +717,20 @@ public sealed class AgentToolRunner
 
     private AgentToolResult ListSkills(string query)
     {
-        var roots = GetSkillRoots();
         var rows = new List<string>();
-        foreach (var root in roots.Where(Directory.Exists))
+        foreach (var skill in EnumerateSkills())
         {
-            foreach (var file in Directory.EnumerateFiles(root, "SKILL.md", SearchOption.AllDirectories))
+            var haystack = $"{skill.Name}\n{skill.Description}";
+            if (!string.IsNullOrWhiteSpace(query)
+                && !haystack.Contains(query, StringComparison.OrdinalIgnoreCase))
             {
-                var text = SafeRead(file, 3000);
-                var name = new DirectoryInfo(Path.GetDirectoryName(file)!).Name;
-                if (string.Equals(name, "memory-saver", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
+                continue;
+            }
 
-                var description = ExtractDescription(text);
-                var haystack = $"{name}\n{description}";
-                if (!string.IsNullOrWhiteSpace(query)
-                    && !haystack.Contains(query, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                rows.Add($"- {name}: {description} ({file})");
-                if (rows.Count >= 30)
-                {
-                    break;
-                }
+            rows.Add($"- {skill.Name}: {skill.Description} ({skill.File})");
+            if (rows.Count >= 30)
+            {
+                break;
             }
         }
 
@@ -559,7 +738,7 @@ public sealed class AgentToolRunner
         return AgentToolResult.Success("list_skills", rows.Count == 0 ? "没有找到匹配 skill。" : $"找到 {rows.Count} 个 skill。", content);
     }
 
-    private AgentToolResult ReadSkill(string name)
+    private AgentToolResult ReadSkill(string name, string activationReason = "")
     {
         if (string.IsNullOrWhiteSpace(name))
         {
@@ -574,7 +753,16 @@ public sealed class AgentToolRunner
         var match = FindSkill(name);
         if (match.File is not null)
         {
-            return BuildContentResult("read_skill", $"已读取并激活 skill：{match.Name}。请按该 SKILL.md 的流程继续完成用户请求。", SafeRead(match.File, 30000));
+            activeSkill = BuildActiveSkillContext(match.Name, match.File);
+            toolStep = 0;
+            var reason = string.IsNullOrWhiteSpace(activationReason)
+                ? ""
+                : $"{Environment.NewLine}- activation_reason: {activationReason}";
+            return BuildContentResult(
+                "read_skill",
+                $"已读取并激活 skill：{match.Name}。请按该 SKILL.md 的流程继续完成用户请求。",
+                BuildSkillReadContent(activeSkill, reason),
+                14000);
         }
 
         var candidates = FindSkillCandidates(name);
@@ -582,6 +770,236 @@ public sealed class AgentToolRunner
             ? $"{Environment.NewLine}可能是：{string.Join("、", candidates)}。请用候选名称重新调用 read_skill。"
             : "";
         return AgentToolResult.Error("read_skill", "skill_not_found", $"没有找到 skill：{name}{suffix}");
+    }
+
+    private ActiveSkillContext BuildActiveSkillContext(string skillName, string skillFile)
+    {
+        var skillRoot = Path.GetDirectoryName(skillFile) ?? store.SkillDirectory;
+        var skillMarkdown = SafeRead(skillFile, 30000);
+        var gates = DiscoverSkillRuntimeGates(skillRoot, skillMarkdown);
+        var required = DiscoverSkillFiles(skillRoot, skillMarkdown, requiredOnly: true);
+        foreach (var path in gates.StartupFiles.Concat(gates.FinalReviewFiles))
+        {
+            AddDistinct(required, path);
+        }
+
+        var suggested = DiscoverSkillFiles(skillRoot, skillMarkdown, requiredOnly: false)
+            .Where(path => !required.Contains(path, StringComparer.OrdinalIgnoreCase))
+            .ToList();
+
+        return new ActiveSkillContext
+        {
+            Name = skillName,
+            RootPath = skillRoot,
+            SkillFile = skillFile,
+            SkillMarkdown = skillMarkdown,
+            RequiredFiles = required,
+            SuggestedFiles = suggested,
+            StartupFiles = gates.StartupFiles,
+            FinalReviewFiles = gates.FinalReviewFiles,
+            RequiresIndexSelectedFile = gates.RequiresIndexSelectedFile,
+            IndexSelectionReason = gates.IndexSelectionReason
+        };
+    }
+
+    private string BuildSkillReadContent(ActiveSkillContext context, string activationReason)
+    {
+        var skillRoot = context.RootPath;
+        var relativeRoot = GetRelativeWorkspacePath(skillRoot);
+        var localEntries = Directory.Exists(skillRoot)
+            ? Directory.EnumerateFileSystemEntries(skillRoot)
+                .Where(entry => !Path.GetFileName(entry).Equals("SKILL.md", StringComparison.OrdinalIgnoreCase))
+                .Order(StringComparer.OrdinalIgnoreCase)
+                .Take(40)
+                .Select(entry =>
+                {
+                    var kind = Directory.Exists(entry) ? "[dir]" : "[file]";
+                    return $"- {kind} {GetRelativeWorkspacePath(entry)}";
+                })
+                .ToList()
+            : [];
+        var localFilesText = localEntries.Count == 0
+            ? "- 未发现额外本地资料。"
+            : string.Join(Environment.NewLine, localEntries);
+        var requiredFiles = context.RequiredFiles.Count == 0
+            ? "- 未从 SKILL.md 识别出显式必读文件。"
+            : string.Join(Environment.NewLine, context.RequiredFiles.Select(path => $"- {path}"));
+        var suggestedFiles = context.SuggestedFiles.Count == 0
+            ? "- 未从 SKILL.md 或常见目录识别出额外建议文件。"
+            : string.Join(Environment.NewLine, context.SuggestedFiles.Take(20).Select(path => $"- {path}"));
+        var startupFiles = context.StartupFiles.Count == 0
+            ? "- 未识别到 startup gate。"
+            : string.Join(Environment.NewLine, context.StartupFiles.Select(path => $"- {path}"));
+        var finalReviewFiles = context.FinalReviewFiles.Count == 0
+            ? "- 未识别到 final review gate。"
+            : string.Join(Environment.NewLine, context.FinalReviewFiles.Select(path => $"- {path}"));
+        var indexSelectedGate = context.RequiresIndexSelectedFile
+            ? "- 已启用：读完 index 后必须继续读取至少一个 index 指向的具体内容文件。"
+            : "- 未启用。";
+
+        return $"""
+        # Active Skill Context
+
+        - skill_name: {context.Name}
+        - skill_root: `{relativeRoot}`
+        {activationReason}
+        - path_rule: 本 skill 的相对路径都优先以 `skill_root` 为根目录解析。比如 SKILL.md 写 `knowledge/foo.md`，应读取 `{relativeRoot}/knowledge/foo.md`，不是爱弥斯人设知识库里的 `knowledge/foo.md`。
+        - read_rule: 读取 skill 自带资料时，优先使用 `list_skill_files`、`find_skill_files`、`read_skill_file`。只有当 SKILL.md 明确要求读取桌宠人设/世界观 knowledge 时，才使用 `search_knowledge` 或 `read_knowledge`。
+        - compliance_rule: `Required Skill Files` 中的文件在最终答复前必须读取；如果文件不存在或不适用，必须说明卡点。
+        - gate_rule: 必须先通过 startup gate，再读索引对应内容；如果有 final review gate，最终答复前必须重新读取这些规范文件。
+
+        ## Local Skill Files
+
+        {localFilesText}
+
+        ## Startup Gate Files
+
+        {startupFiles}
+
+        ## Required Skill Files
+
+        {requiredFiles}
+
+        ## Index Selected Content Gate
+
+        {indexSelectedGate}
+
+        ## Final Review Gate Files
+
+        {finalReviewFiles}
+
+        ## Suggested Skill Files
+
+        {suggestedFiles}
+
+        # SKILL.md
+
+        {context.SkillMarkdown}
+        """;
+    }
+
+    private AgentToolResult ListSkillFiles(string path)
+    {
+        if (activeSkill is null)
+        {
+            return AgentToolResult.Error("list_skill_files", "no_active_skill", "当前没有激活 skill。请先调用 read_skill 或 load_skill。");
+        }
+
+        var directory = ResolveActiveSkillPath(path);
+        if (!Directory.Exists(directory))
+        {
+            return AgentToolResult.Error("list_skill_files", "directory_not_found", $"目录不存在：{GetActiveSkillRelativePath(directory)}");
+        }
+
+        var rows = Directory.EnumerateFileSystemEntries(directory)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .Take(120)
+            .Select(entry =>
+            {
+                var kind = Directory.Exists(entry) ? "[dir]" : "[file]";
+                return $"- {kind} {GetActiveSkillRelativePath(entry)}";
+            });
+        return BuildContentResult("list_skill_files", $"已列出当前 skill 目录：{GetActiveSkillRelativePath(directory)}。", string.Join(Environment.NewLine, rows));
+    }
+
+    private AgentToolResult FindSkillFiles(string query, string path)
+    {
+        if (activeSkill is null)
+        {
+            return AgentToolResult.Error("find_skill_files", "no_active_skill", "当前没有激活 skill。请先调用 read_skill 或 load_skill。");
+        }
+
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return AgentToolResult.Error("find_skill_files", "missing_argument", "缺少参数：query。");
+        }
+
+        var root = ResolveActiveSkillPath(path);
+        if (File.Exists(root))
+        {
+            root = Path.GetDirectoryName(root) ?? activeSkill.RootPath;
+        }
+
+        if (!Directory.Exists(root))
+        {
+            return AgentToolResult.Error("find_skill_files", "directory_not_found", $"目录不存在：{GetActiveSkillRelativePath(root)}");
+        }
+
+        var normalizedQuery = query.Trim().Trim('"', '`');
+        var rows = Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories)
+            .Where(entry => !IsSensitivePath(entry))
+            .Where(entry =>
+            {
+                var relative = GetActiveSkillRelativePath(entry);
+                return Path.GetFileName(entry).Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase)
+                    || relative.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase);
+            })
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .Take(100)
+            .Select(entry =>
+            {
+                var kind = Directory.Exists(entry) ? "[dir]" : "[file]";
+                return $"- {kind} {GetActiveSkillRelativePath(entry)}";
+            })
+            .ToList();
+
+        var content = rows.Count == 0
+            ? $"没有在当前 skill 中找到匹配文件：{normalizedQuery}"
+            : string.Join(Environment.NewLine, rows);
+        return BuildContentResult("find_skill_files", rows.Count == 0 ? "没有找到匹配 skill 文件。" : $"找到 {rows.Count} 个 skill 文件匹配项。", content);
+    }
+
+    private AgentToolResult ReadSkillFile(string path, int maxChars)
+    {
+        if (activeSkill is null)
+        {
+            return AgentToolResult.Error("read_skill_file", "no_active_skill", "当前没有激活 skill。请先调用 read_skill 或 load_skill。");
+        }
+
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return AgentToolResult.Error("read_skill_file", "missing_argument", "缺少参数：path。");
+        }
+
+        var file = ResolveActiveSkillPath(path);
+        if (!File.Exists(file))
+        {
+            var candidates = FindActiveSkillFileCandidates(path).ToList();
+            if (candidates.Count == 1)
+            {
+                file = candidates[0];
+            }
+            else if (candidates.Count > 1)
+            {
+                var rows = candidates
+                    .Take(8)
+                    .Select(candidate => $"- {GetActiveSkillRelativePath(candidate)}");
+                return AgentToolResult.Error(
+                    "read_skill_file",
+                    "ambiguous_file",
+                    $"当前 skill 中找到多个匹配文件，请指定更完整路径：{Environment.NewLine}{string.Join(Environment.NewLine, rows)}");
+            }
+            else
+            {
+                return AgentToolResult.Error("read_skill_file", "file_not_found", $"当前 skill 文件不存在：{GetActiveSkillRelativePath(file)}");
+            }
+        }
+
+        if (IsSensitivePath(file))
+        {
+            return AgentToolResult.Error("read_skill_file", "sensitive_file", "该文件可能包含 API key、token 或密钥，文件工具已拦截。");
+        }
+
+        var relativePath = NormalizeSkillRelativePath(GetActiveSkillRelativePath(file));
+        activeSkill.MarkFileRead(relativePath, toolStep);
+        var content = File.ReadAllText(file, Encoding.UTF8);
+        var limit = Math.Clamp(maxChars, 1000, 30000);
+        if (content.Length > limit)
+        {
+            content = content[..limit] + $"{Environment.NewLine}{Environment.NewLine}[文件内容较长，本次已按 max_chars 截断。需要更多内容时调大 max_chars 再读。]";
+        }
+
+        return BuildContentResult("read_skill_file", $"已读取当前 skill 文件：{GetActiveSkillRelativePath(file)}。", content, 14000);
     }
 
     private AgentToolResult ListFiles(string path)
@@ -806,7 +1224,7 @@ public sealed class AgentToolRunner
     {
         if (string.IsNullOrWhiteSpace(path))
         {
-            path = Path.Combine("workspace", "output", $"桌宠笔记-{DateTime.Now:yyyyMMdd-HHmmss}.md");
+            path = Path.Combine("workspace", "output", "notes", DateTime.Now.ToString("yyyy-MM-dd"), $"桌宠笔记-{DateTime.Now:yyyyMMdd-HHmmss}.md");
         }
 
         var file = ResolveWorkspacePath(path);
@@ -819,6 +1237,115 @@ public sealed class AgentToolRunner
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         File.WriteAllText(file, content ?? "", Encoding.UTF8);
         return AgentToolResult.Success("write_file", $"已写入：{GetRelativeWorkspacePath(file)}。", $"已写入：{GetRelativeWorkspacePath(file)}");
+    }
+
+    private AgentToolResult PythonExecute(string code, string scriptPath, int timeoutSeconds)
+    {
+        try
+        {
+            var workspaceRoot = Path.GetFullPath(store.WorkspaceDirectory);
+            Directory.CreateDirectory(Path.Combine(workspaceRoot, "scripts", "runtime", "python-runs"));
+            Directory.CreateDirectory(Path.Combine(workspaceRoot, "output"));
+
+            if (string.IsNullOrWhiteSpace(code))
+            {
+                if (string.IsNullOrWhiteSpace(scriptPath))
+                {
+                    return AgentToolResult.Error("python_execute", "missing_argument", "缺少参数：code 或 path。");
+                }
+
+                var scriptFile = ResolveWorkspacePath(scriptPath);
+                GuardPythonWorkspacePath(scriptFile);
+                if (!File.Exists(scriptFile))
+                {
+                    return AgentToolResult.Error("python_execute", "script_not_found", $"Python 脚本不存在：{GetRelativeWorkspacePath(scriptFile)}");
+                }
+
+                code = File.ReadAllText(scriptFile, Encoding.UTF8);
+            }
+
+            var policyError = ValidatePythonCode(code);
+            if (!string.IsNullOrWhiteSpace(policyError))
+            {
+                return AgentToolResult.Error("python_execute", "policy_blocked", policyError);
+            }
+
+            var script = BuildPythonSandboxPrelude(workspaceRoot) + Environment.NewLine + code;
+            var runtimeScript = Path.Combine(workspaceRoot, "scripts", "runtime", "python-runs", $"{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.py");
+            File.WriteAllText(runtimeScript, script, Encoding.UTF8);
+
+            var python = ResolvePythonExecutable();
+            if (python is null)
+            {
+                return AgentToolResult.Error("python_execute", "python_not_found", "没有找到可用 Python。请安装 Python 3，或后续把便携 Python 放到 workspace/python/python.exe 或程序目录 python/python.exe。");
+            }
+
+            var timeout = TimeSpan.FromSeconds(Math.Clamp(timeoutSeconds <= 0 ? 30 : timeoutSeconds, 1, 120));
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = python.Value.FileName,
+                WorkingDirectory = workspaceRoot,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+            foreach (var arg in python.Value.Arguments)
+            {
+                startInfo.ArgumentList.Add(arg);
+            }
+            startInfo.ArgumentList.Add(runtimeScript);
+            startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
+            startInfo.Environment["PYTHONPATH"] = Path.Combine(workspaceRoot, "scripts");
+
+            using var process = Process.Start(startInfo);
+            if (process is null)
+            {
+                return AgentToolResult.Error("python_execute", "process_start_failed", "Python 进程启动失败。");
+            }
+
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit((int)timeout.TotalMilliseconds))
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                    // Ignore kill failures; timeout error is enough for the model.
+                }
+
+                return AgentToolResult.Error("python_execute", "timeout", $"Python 执行超过 {timeout.TotalSeconds:0} 秒，已中止。");
+            }
+
+            var stdout = stdoutTask.GetAwaiter().GetResult();
+            var stderr = stderrTask.GetAwaiter().GetResult();
+            var output = $"""
+            exit_code: {process.ExitCode}
+            script: {GetRelativeWorkspacePath(runtimeScript)}
+
+            stdout:
+            {stdout.Trim()}
+
+            stderr:
+            {stderr.Trim()}
+            """;
+
+            if (process.ExitCode != 0)
+            {
+                return BuildContentResult("python_execute", $"Python 执行失败，exit_code={process.ExitCode}。", output, 12000);
+            }
+
+            return BuildContentResult("python_execute", "Python 执行完成。", output, 12000);
+        }
+        catch (Exception ex)
+        {
+            return AgentToolResult.Error("python_execute", "tool_exception", ex.Message);
+        }
     }
 
     private AgentToolResult CreateTask(string title, string detail, string status)
@@ -1118,9 +1645,8 @@ public sealed class AgentToolRunner
         }
     }
 
-    private AgentToolResult BuildContentResult(string tool, string summary, string content)
+    private AgentToolResult BuildContentResult(string tool, string summary, string content, int inlineLimit = 6000)
     {
-        const int inlineLimit = 6000;
         if (content.Length <= inlineLimit)
         {
             return AgentToolResult.Success(tool, summary, content);
@@ -1129,6 +1655,411 @@ public sealed class AgentToolRunner
         var handle = store.SaveToolOutput(tool, content);
         var preview = content[..inlineLimit] + $"{Environment.NewLine}{Environment.NewLine}[内容过长，完整内容已保存为 handle：{handle}。需要更多内容时调用 handle_read。]";
         return AgentToolResult.Success(tool, $"{summary} 内容较长，已生成 handle：{handle}。", preview, handle);
+    }
+
+    private (string Name, string Reason)? FindSkillRoute(string userMessage)
+    {
+        var text = (userMessage ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        var skills = EnumerateSkills().ToList();
+        if (skills.Count == 0)
+        {
+            return null;
+        }
+
+        var explicitSkillIntent = ContainsAny(text, "skill", "技能", "能力")
+            && ContainsAny(text, "调用", "使用", "执行", "读取", "激活", "跑一下", "用一下", "按");
+        var taskIntent = ContainsAny(text, "帮我", "生成", "写", "查询", "统计", "创建", "处理", "执行", "整理", "保存", "记住", "分析", "检查", "修复");
+        var best = skills
+            .Select(skill => (skill, score: ScoreSkillRoute(text, skill.Name, skill.Description, explicitSkillIntent, taskIntent)))
+            .Where(item => item.score > 0)
+            .OrderByDescending(item => item.score)
+            .ToList();
+        if (best.Count == 0)
+        {
+            return null;
+        }
+
+        var top = best[0];
+        if (top.score < 3)
+        {
+            return null;
+        }
+
+        if (best.Count > 1 && best[1].score >= top.score - 1)
+        {
+            return null;
+        }
+
+        return (top.skill.Name, $"匹配分数 {top.score}，命中 skill 描述/名称。");
+    }
+
+    private static int ScoreSkillRoute(string userMessage, string skillName, string description, bool explicitSkillIntent, bool taskIntent)
+    {
+        var score = 0;
+        var normalizedUser = NormalizeSkillName(userMessage);
+        var normalizedName = NormalizeSkillName(skillName);
+        if (!string.IsNullOrWhiteSpace(normalizedName)
+            && normalizedUser.Contains(normalizedName, StringComparison.OrdinalIgnoreCase))
+        {
+            score += explicitSkillIntent ? 12 : 8;
+        }
+
+        if (userMessage.Contains(skillName, StringComparison.OrdinalIgnoreCase))
+        {
+            score += explicitSkillIntent ? 12 : 8;
+        }
+
+        var haystack = $"{skillName} {description}";
+        foreach (var term in ExtractRouteTerms(userMessage).Take(20))
+        {
+            if (haystack.Contains(term, StringComparison.OrdinalIgnoreCase))
+            {
+                score += term.Length >= 3 ? 3 : 2;
+            }
+        }
+
+        foreach (var term in ExtractRouteTerms(description).Take(40))
+        {
+            if (userMessage.Contains(term, StringComparison.OrdinalIgnoreCase))
+            {
+                score += term.Length >= 3 ? 3 : 2;
+            }
+        }
+
+        if (!taskIntent && !explicitSkillIntent)
+        {
+            score -= 4;
+        }
+
+        return score;
+    }
+
+    private static IEnumerable<string> ExtractRouteTerms(string text)
+    {
+        foreach (Match match in Regex.Matches(text ?? "", @"[\p{IsCJKUnifiedIdeographs}A-Za-z0-9_\-]+"))
+        {
+            var value = match.Value.Trim('-', '_');
+            if (value.Length is >= 2 and <= 18)
+            {
+                yield return value;
+            }
+        }
+    }
+
+    private sealed class SkillRuntimeGates
+    {
+        public List<string> StartupFiles { get; } = [];
+
+        public List<string> FinalReviewFiles { get; } = [];
+
+        public bool RequiresIndexSelectedFile { get; set; }
+
+        public string IndexSelectionReason { get; set; } = "";
+    }
+
+    private static SkillRuntimeGates DiscoverSkillRuntimeGates(string skillRoot, string skillMarkdown)
+    {
+        var gates = new SkillRuntimeGates();
+        var lines = (skillMarkdown ?? "").Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        var inRuntimeGates = false;
+        var currentBucket = "";
+
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.Trim();
+            if (Regex.IsMatch(line, @"^#{1,6}\s+"))
+            {
+                inRuntimeGates = line.Contains("runtime", StringComparison.OrdinalIgnoreCase)
+                    && (line.Contains("gate", StringComparison.OrdinalIgnoreCase)
+                        || line.Contains("gates", StringComparison.OrdinalIgnoreCase)
+                        || line.Contains("门禁", StringComparison.OrdinalIgnoreCase)
+                        || line.Contains("流程", StringComparison.OrdinalIgnoreCase));
+                currentBucket = "";
+                continue;
+            }
+
+            if (inRuntimeGates)
+            {
+                var normalizedLine = line.TrimStart('-', '*', ' ').Trim();
+                if (normalizedLine.StartsWith("startup", StringComparison.OrdinalIgnoreCase)
+                    || normalizedLine.StartsWith("start", StringComparison.OrdinalIgnoreCase)
+                    || normalizedLine.StartsWith("before_start", StringComparison.OrdinalIgnoreCase)
+                    || normalizedLine.StartsWith("启动", StringComparison.OrdinalIgnoreCase)
+                    || normalizedLine.StartsWith("开始", StringComparison.OrdinalIgnoreCase))
+                {
+                    currentBucket = "startup";
+                    foreach (var path in ExtractSkillPathMentions(normalizedLine))
+                    {
+                        AddExistingSkillPath(skillRoot, gates.StartupFiles, path);
+                    }
+                    continue;
+                }
+
+                if (normalizedLine.StartsWith("before_final", StringComparison.OrdinalIgnoreCase)
+                    || normalizedLine.StartsWith("final_review", StringComparison.OrdinalIgnoreCase)
+                    || normalizedLine.StartsWith("before_answer", StringComparison.OrdinalIgnoreCase)
+                    || normalizedLine.StartsWith("输出前", StringComparison.OrdinalIgnoreCase)
+                    || normalizedLine.StartsWith("最终", StringComparison.OrdinalIgnoreCase))
+                {
+                    currentBucket = "final";
+                    foreach (var path in ExtractSkillPathMentions(normalizedLine))
+                    {
+                        AddExistingSkillPath(skillRoot, gates.FinalReviewFiles, path);
+                    }
+                    continue;
+                }
+
+                if (normalizedLine.StartsWith("must_use_index", StringComparison.OrdinalIgnoreCase)
+                    || normalizedLine.StartsWith("index_selected_content", StringComparison.OrdinalIgnoreCase)
+                    || normalizedLine.StartsWith("索引选择", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (ContainsAny(normalizedLine, "true", "yes", "1", "必须", "启用"))
+                    {
+                        gates.RequiresIndexSelectedFile = true;
+                        gates.IndexSelectionReason = normalizedLine;
+                    }
+                    continue;
+                }
+
+                if (currentBucket == "startup" || currentBucket == "final")
+                {
+                    foreach (var path in ExtractSkillPathMentions(normalizedLine))
+                    {
+                        AddExistingSkillPath(skillRoot, currentBucket == "startup" ? gates.StartupFiles : gates.FinalReviewFiles, path);
+                    }
+                }
+            }
+
+            var isFinalReviewLine = ContainsAny(line, "最终输出前", "输出前", "生成前", "答复前", "回复前", "before final", "before answer", "final review");
+            var isStartupLine = ContainsAny(line, "先读取", "先读", "先看", "先打开", "第一步", "启动时", "开始时", "read first", "first read", "startup");
+            foreach (var path in ExtractSkillPathMentions(line))
+            {
+                if (isFinalReviewLine)
+                {
+                    AddExistingSkillPath(skillRoot, gates.FinalReviewFiles, path);
+                }
+                else if (isStartupLine)
+                {
+                    AddExistingSkillPath(skillRoot, gates.StartupFiles, path);
+                }
+            }
+
+            if (!gates.RequiresIndexSelectedFile && LooksLikeIndexRoutingInstruction(line))
+            {
+                gates.RequiresIndexSelectedFile = true;
+                gates.IndexSelectionReason = line.Length <= 120 ? line : line[..120] + "...";
+            }
+        }
+
+        if (!gates.RequiresIndexSelectedFile
+            && gates.StartupFiles.Any(path => Path.GetFileName(path).Equals("index.md", StringComparison.OrdinalIgnoreCase))
+            && ContainsAny(skillMarkdown ?? "", "对应文件", "相关文件", "根据索引", "根据 index", "索引中", "index 中"))
+        {
+            gates.RequiresIndexSelectedFile = true;
+            gates.IndexSelectionReason = "startup gate 包含 index.md，且 SKILL.md 描述了按索引定位对应文件。";
+        }
+
+        return gates;
+    }
+
+    private static bool LooksLikeIndexRoutingInstruction(string line)
+    {
+        var hasIndex = ContainsAny(line, "index", "索引", "目录");
+        var hasRoutingVerb = ContainsAny(line, "根据", "对应", "找到", "选择", "定位", "匹配", "路由");
+        var hasReadVerb = ContainsAny(line, "读取", "读", "打开", "查看");
+        return hasIndex && hasRoutingVerb && hasReadVerb;
+    }
+
+    private static void AddExistingSkillPath(string skillRoot, List<string> list, string path)
+    {
+        if (IsExistingSkillTextFile(skillRoot, path))
+        {
+            AddDistinct(list, NormalizeSkillRelativePath(path));
+        }
+    }
+
+    private static List<string> DiscoverSkillFiles(string skillRoot, string skillMarkdown, bool requiredOnly)
+    {
+        var results = new List<string>();
+        foreach (var line in (skillMarkdown ?? "").Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var required = ContainsAny(line, "必须", "必需", "先读取", "先读", "输出前", "生成前", "required", "must", "before");
+            if (requiredOnly != required)
+            {
+                continue;
+            }
+
+            foreach (var path in ExtractSkillPathMentions(line))
+            {
+                if (IsExistingSkillTextFile(skillRoot, path))
+                {
+                    AddDistinct(results, NormalizeSkillRelativePath(path));
+                }
+            }
+        }
+
+        if (!requiredOnly)
+        {
+            foreach (var path in DiscoverCommonSkillIndexFiles(skillRoot))
+            {
+                AddDistinct(results, path);
+            }
+        }
+
+        if (requiredOnly)
+        {
+            var checklist = Path.Combine(skillRoot, "checklist.md");
+            if (File.Exists(checklist))
+            {
+                AddDistinct(results, "checklist.md");
+            }
+        }
+
+        return results;
+    }
+
+    private static IEnumerable<string> ExtractSkillPathMentions(string text)
+    {
+        foreach (Match match in Regex.Matches(text ?? "", @"(?<![\w.-])((?:knowledge|references|rules|schemas|schema|assets|templates|examples|scripts)[\\/][^\s`""'，。；；,;:：)）\]]+|checklist\.md|[A-Za-z0-9_\-]+\.md)"))
+        {
+            var path = match.Groups[1].Value.Trim().Trim('.', ',', ';', ':', '，', '。', '；', '：', ')', '）', ']');
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                yield return path.Replace('\\', '/');
+            }
+        }
+    }
+
+    private static IEnumerable<string> DiscoverCommonSkillIndexFiles(string skillRoot)
+    {
+        foreach (var relative in new[]
+        {
+            "knowledge/index.md",
+            "references/index.md",
+            "rules/index.md",
+            "schemas/index.md",
+            "schema/index.md",
+            "README.md"
+        })
+        {
+            if (File.Exists(Path.Combine(skillRoot, relative.Replace('/', Path.DirectorySeparatorChar))))
+            {
+                yield return relative;
+            }
+        }
+    }
+
+    private static bool IsExistingSkillTextFile(string skillRoot, string relativePath)
+    {
+        var candidate = Path.GetFullPath(Path.Combine(skillRoot, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+        var root = Path.GetFullPath(skillRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!candidate.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return File.Exists(candidate) && IsTextLikePath(candidate);
+    }
+
+    private static bool IsTextLikePath(string path)
+    {
+        var ext = Path.GetExtension(path);
+        return string.IsNullOrWhiteSpace(ext)
+            || ext.Equals(".md", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".txt", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".json", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".yaml", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".yml", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".csv", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void AddDistinct(List<string> list, string value)
+    {
+        if (!list.Contains(value, StringComparer.OrdinalIgnoreCase))
+        {
+            list.Add(value);
+        }
+    }
+
+    private string ResolveActiveSkillPath(string path)
+    {
+        if (activeSkill is null)
+        {
+            throw new InvalidOperationException("当前没有激活 skill。");
+        }
+
+        var root = Path.GetFullPath(activeSkill.RootPath);
+        var trimmed = (path ?? "").Trim().Trim('"', '`').Replace('/', Path.DirectorySeparatorChar);
+        var target = string.IsNullOrWhiteSpace(trimmed)
+            ? root
+            : Path.GetFullPath(Path.IsPathRooted(trimmed)
+                ? trimmed
+                : Path.Combine(root, trimmed));
+        var rootPrefix = root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!target.Equals(root, StringComparison.OrdinalIgnoreCase)
+            && !target.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("路径超出当前 skill 目录，已拦截。");
+        }
+
+        GuardSensitivePath(target);
+        return target;
+    }
+
+    private string GetActiveSkillRelativePath(string path)
+    {
+        if (activeSkill is null)
+        {
+            return path;
+        }
+
+        return NormalizeSkillRelativePath(Path.GetRelativePath(activeSkill.RootPath, path));
+    }
+
+    private IEnumerable<string> FindActiveSkillFileCandidates(string query)
+    {
+        if (activeSkill is null)
+        {
+            yield break;
+        }
+
+        var normalizedQuery = (query ?? "").Trim().Trim('"', '`').Replace('\\', '/');
+        if (string.IsNullOrWhiteSpace(normalizedQuery))
+        {
+            yield break;
+        }
+
+        foreach (var file in Directory.EnumerateFiles(activeSkill.RootPath, "*", SearchOption.AllDirectories))
+        {
+            if (IsSensitivePath(file))
+            {
+                continue;
+            }
+
+            var relative = GetActiveSkillRelativePath(file);
+            if (Path.GetFileName(file).Equals(normalizedQuery, StringComparison.OrdinalIgnoreCase)
+                || relative.Equals(normalizedQuery, StringComparison.OrdinalIgnoreCase)
+                || Path.GetFileName(file).Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase)
+                || relative.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase))
+            {
+                yield return file;
+            }
+        }
+    }
+
+    private static string NormalizeSkillRelativePath(string path)
+    {
+        return (path ?? "").Trim().Trim('"', '`').Replace('\\', '/').TrimStart('/');
+    }
+
+    private static bool ContainsAny(string text, params string[] needles)
+    {
+        return needles.Any(needle => text.Contains(needle, StringComparison.OrdinalIgnoreCase));
     }
 
     private string ResolveWorkspacePath(string path)
@@ -1202,6 +2133,18 @@ public sealed class AgentToolRunner
     {
         var target = Path.GetFullPath(path)
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var workspaceRoot = Path.GetFullPath(store.WorkspaceDirectory)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var profilePath = Path.GetFullPath(store.ProfilePath)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var isWorkspace = string.Equals(target, workspaceRoot, StringComparison.OrdinalIgnoreCase)
+            || target.StartsWith(workspaceRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        var isDefaultAgent = string.Equals(target, profilePath, StringComparison.OrdinalIgnoreCase);
+        if (!isWorkspace && !isDefaultAgent)
+        {
+            throw new InvalidOperationException("Startup Permission Hook 已拦截：只能写入 workspace/** 或 default-agent.md。");
+        }
+
         var knowledgeRoot = Path.GetFullPath(store.KnowledgeDirectory)
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         if (string.Equals(target, knowledgeRoot, StringComparison.OrdinalIgnoreCase)
@@ -1209,6 +2152,184 @@ public sealed class AgentToolRunner
         {
             throw new InvalidOperationException("knowledge 知识库是只读资料区，桌宠不能自行修改世界观、人设或台词资料。请让用户手动维护这些文件。");
         }
+    }
+
+    private void GuardPythonWorkspacePath(string path)
+    {
+        var target = Path.GetFullPath(path)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var workspaceRoot = Path.GetFullPath(store.WorkspaceDirectory)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (!string.Equals(target, workspaceRoot, StringComparison.OrdinalIgnoreCase)
+            && !target.StartsWith(workspaceRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Python 只能读取和写入 workspace 内的文件。");
+        }
+
+        GuardSensitivePath(target);
+    }
+
+    private static string ValidatePythonCode(string code)
+    {
+        var blocked = new[]
+        {
+            "subprocess",
+            "socket",
+            "requests",
+            "urllib",
+            "http.client",
+            "ctypes",
+            "multiprocessing",
+            "__import__",
+            "importlib",
+            "eval(",
+            "exec(",
+            "os.system",
+            "os.popen",
+            "os.remove",
+            "os.unlink",
+            "os.rmdir",
+            "shutil.rmtree",
+            "Path.unlink",
+            ".unlink(",
+            ".rmdir("
+        };
+
+        foreach (var token in blocked)
+        {
+            if ((code ?? "").Contains(token, StringComparison.OrdinalIgnoreCase))
+            {
+                return $"Python 代码触发权限 hook 拦截：包含被禁用的片段 `{token}`。";
+            }
+        }
+
+        return "";
+    }
+
+    private static (string FileName, string[] Arguments)? ResolvePythonExecutable()
+    {
+        var candidates = new[]
+        {
+            (Path.Combine(AppContext.BaseDirectory, "python", "python.exe"), Array.Empty<string>()),
+            (Path.Combine(AppContext.BaseDirectory, "UserData", "Agents", "workspace", "python", "python.exe"), Array.Empty<string>()),
+            ("python", Array.Empty<string>()),
+            ("py", new[] { "-3" })
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (Path.IsPathRooted(candidate.Item1) && !File.Exists(candidate.Item1))
+            {
+                continue;
+            }
+
+            try
+            {
+                var info = new ProcessStartInfo
+                {
+                    FileName = candidate.Item1,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+                foreach (var arg in candidate.Item2)
+                {
+                    info.ArgumentList.Add(arg);
+                }
+                info.ArgumentList.Add("--version");
+                using var process = Process.Start(info);
+                if (process is null)
+                {
+                    continue;
+                }
+                if (!process.WaitForExit(3000))
+                {
+                    try
+                    {
+                        process.Kill(entireProcessTree: true);
+                    }
+                    catch
+                    {
+                    }
+                    continue;
+                }
+                if (process.ExitCode == 0)
+                {
+                    return (candidate.Item1, candidate.Item2);
+                }
+            }
+            catch
+            {
+                // Try the next candidate.
+            }
+        }
+
+        return null;
+    }
+
+    private static string BuildPythonSandboxPrelude(string workspaceRoot)
+    {
+        var rootLiteral = JsonSerializer.Serialize(Path.GetFullPath(workspaceRoot));
+        return $$"""
+        import builtins
+        import io
+        import os
+        import pathlib
+        import sys
+
+        _AEMEATH_WORKSPACE_ROOT = os.path.realpath({{rootLiteral}})
+        _AEMEATH_WORKSPACE_SCRIPTS = os.path.join(_AEMEATH_WORKSPACE_ROOT, "scripts")
+        if _AEMEATH_WORKSPACE_SCRIPTS not in sys.path:
+            sys.path.insert(0, _AEMEATH_WORKSPACE_SCRIPTS)
+        _AEMEATH_ORIGINAL_OPEN = builtins.open
+
+        def _aemeath_resolve_path(file):
+            raw = os.fspath(file)
+            path = raw if os.path.isabs(raw) else os.path.join(_AEMEATH_WORKSPACE_ROOT, raw)
+            real = os.path.realpath(path)
+            if real != _AEMEATH_WORKSPACE_ROOT and not real.startswith(_AEMEATH_WORKSPACE_ROOT + os.sep):
+                raise PermissionError("Aemeath Python sandbox: path outside workspace is blocked: " + raw)
+            return real
+
+        def _aemeath_open(file, mode="r", *args, **kwargs):
+            real = _aemeath_resolve_path(file)
+            if any(flag in mode for flag in ("w", "a", "x", "+")):
+                parent = os.path.dirname(real)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+            return _AEMEATH_ORIGINAL_OPEN(real, mode, *args, **kwargs)
+
+        def _aemeath_blocked(*args, **kwargs):
+            raise PermissionError("Aemeath Python sandbox: deletion, process and unrestricted mutation operations are disabled.")
+
+        builtins.open = _aemeath_open
+        io.open = _aemeath_open
+        pathlib.Path.open = lambda self, mode="r", *args, **kwargs: _aemeath_open(str(self), mode, *args, **kwargs)
+        def _aemeath_path_write_text(self, data, encoding=None, errors=None, newline=None):
+            with _aemeath_open(str(self), "w", encoding=encoding or "utf-8", errors=errors, newline=newline) as f:
+                return f.write(data)
+        def _aemeath_path_write_bytes(self, data):
+            with _aemeath_open(str(self), "wb") as f:
+                return f.write(data)
+        pathlib.Path.write_text = _aemeath_path_write_text
+        pathlib.Path.write_bytes = _aemeath_path_write_bytes
+        os.remove = _aemeath_blocked
+        os.unlink = _aemeath_blocked
+        os.rmdir = _aemeath_blocked
+        os.removedirs = _aemeath_blocked
+        os.rename = _aemeath_blocked
+        os.replace = _aemeath_blocked
+        os.system = _aemeath_blocked
+        os.popen = _aemeath_blocked
+        try:
+            import shutil
+            shutil.rmtree = _aemeath_blocked
+            shutil.move = _aemeath_blocked
+        except Exception:
+            pass
+
+        """;
     }
 
     private static bool IsSensitivePath(string path)
@@ -1381,17 +2502,116 @@ public sealed class AgentToolRunner
     {
         foreach (var root in GetSkillRoots().Where(Directory.Exists))
         {
-            foreach (var file in Directory.EnumerateFiles(root, "SKILL.md", SearchOption.AllDirectories))
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var skill in EnumerateSkillsInDirectory(root, 0, visited))
             {
-                var name = new DirectoryInfo(Path.GetDirectoryName(file)!).Name;
-                if (string.Equals(name, "memory-saver", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                yield return (name, file, ExtractDescription(SafeRead(file, 3000)));
+                yield return skill;
             }
         }
+    }
+
+    private IEnumerable<(string Name, string File, string Description)> EnumerateSkillsInDirectory(
+        string directory,
+        int depth,
+        HashSet<string> visited)
+    {
+        if (depth > MaxSkillDiscoveryDepth)
+        {
+            yield break;
+        }
+
+        string fullDirectory;
+        try
+        {
+            fullDirectory = Path.GetFullPath(directory);
+        }
+        catch
+        {
+            yield break;
+        }
+
+        if (!visited.Add(fullDirectory))
+        {
+            yield break;
+        }
+
+        var skillFile = Path.Combine(fullDirectory, "SKILL.md");
+        if (File.Exists(skillFile))
+        {
+            var fallbackName = new DirectoryInfo(fullDirectory).Name;
+            if (!TryParseSkillMetadata(skillFile, fallbackName, out var name, out var description))
+            {
+                yield break;
+            }
+
+            if (!string.Equals(name, "memory-saver", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(fallbackName, "memory-saver", StringComparison.OrdinalIgnoreCase))
+            {
+                yield return (name, skillFile, description);
+            }
+
+            yield break;
+        }
+
+        IEnumerable<string> childDirectories;
+        try
+        {
+            childDirectories = Directory.EnumerateDirectories(fullDirectory)
+                .Where(child => !Path.GetFileName(child).StartsWith(".", StringComparison.Ordinal))
+                .Order(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch
+        {
+            yield break;
+        }
+
+        foreach (var child in childDirectories)
+        {
+            foreach (var skill in EnumerateSkillsInDirectory(child, depth + 1, visited))
+            {
+                yield return skill;
+            }
+        }
+    }
+
+    private static bool TryParseSkillMetadata(string skillFile, string fallbackName, out string name, out string description)
+    {
+        name = fallbackName;
+        description = "无描述";
+
+        string text;
+        try
+        {
+            text = SafeRead(skillFile, 30000);
+        }
+        catch
+        {
+            return false;
+        }
+
+        var frontMatterName = ExtractFrontMatterValue(text, "name");
+        if (!string.IsNullOrWhiteSpace(frontMatterName))
+        {
+            name = frontMatterName;
+        }
+        else
+        {
+            var headingName = ExtractMarkdownTitle(text);
+            if (!string.IsNullOrWhiteSpace(headingName))
+            {
+                name = headingName;
+            }
+        }
+
+        var frontMatterDescription = ExtractFrontMatterValue(text, "description");
+        description = string.IsNullOrWhiteSpace(frontMatterDescription)
+            ? ExtractDescription(text)
+            : frontMatterDescription;
+
+        name = name.Trim();
+        description = string.IsNullOrWhiteSpace(description) ? "无描述" : description.Trim();
+        return !string.IsNullOrWhiteSpace(name);
     }
 
     private static string NormalizeSkillName(string value)
@@ -1467,6 +2687,73 @@ public sealed class AgentToolRunner
     {
         var text = File.ReadAllText(path, Encoding.UTF8);
         return text.Length <= maxChars ? text : text[..maxChars] + "\n\n[内容过长，已截断]";
+    }
+
+    private static string ExtractFrontMatterValue(string text, string key)
+    {
+        var trimmed = text.TrimStart('\uFEFF', ' ', '\t', '\r', '\n');
+        if (!trimmed.StartsWith("---", StringComparison.Ordinal))
+        {
+            return "";
+        }
+
+        var firstLineEnd = trimmed.IndexOf('\n');
+        if (firstLineEnd < 0)
+        {
+            return "";
+        }
+
+        var endMarker = trimmed.IndexOf("\n---", firstLineEnd + 1, StringComparison.Ordinal);
+        if (endMarker < 0)
+        {
+            return "";
+        }
+
+        var frontMatter = trimmed[(firstLineEnd + 1)..endMarker];
+        foreach (var line in frontMatter.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var colon = line.IndexOf(':');
+            if (colon <= 0)
+            {
+                continue;
+            }
+
+            var field = line[..colon].Trim();
+            if (!string.Equals(field, key, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            return UnquoteScalar(line[(colon + 1)..].Trim());
+        }
+
+        return "";
+    }
+
+    private static string ExtractMarkdownTitle(string text)
+    {
+        foreach (var line in text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.StartsWith("# ", StringComparison.Ordinal))
+            {
+                return trimmed[2..].Trim();
+            }
+        }
+
+        return "";
+    }
+
+    private static string UnquoteScalar(string value)
+    {
+        if (value.Length >= 2
+            && ((value.StartsWith("\"", StringComparison.Ordinal) && value.EndsWith("\"", StringComparison.Ordinal))
+                || (value.StartsWith("'", StringComparison.Ordinal) && value.EndsWith("'", StringComparison.Ordinal))))
+        {
+            return value[1..^1].Trim();
+        }
+
+        return value;
     }
 
     private static string ExtractDescription(string text)

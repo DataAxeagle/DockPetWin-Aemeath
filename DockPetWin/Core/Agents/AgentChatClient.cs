@@ -52,9 +52,33 @@ public sealed class AgentChatClient
         var workingHistory = history.ToList();
         var loopMessages = history.Select(LoopMessage.FromAgentMessage).ToList();
         loopMessages.Add(LoopMessage.User(userMessage));
-        var maxRounds = Math.Clamp(settings.MaxToolRounds, 1, 12);
+        var configuredMaxRounds = Math.Clamp(settings.MaxToolRounds, 1, 12);
+        var skillMaxRounds = Math.Clamp(settings.MaxToolRounds + 4, 1, 16);
+        var maxRounds = configuredMaxRounds;
         var toolTrace = new List<string>();
         var toolCallCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var routedSkillResult = runner.TryAutoLoadSkillForMessage(userMessage);
+        if (routedSkillResult is not null)
+        {
+            maxRounds = skillMaxRounds;
+            var toolResult = AgentToolRunner.FormatResult(routedSkillResult);
+            toolTrace.Add($"## Skill Runtime: read_skill\n\n参数：auto_route\n\n结果：\n{toolResult}");
+            onToolTrace?.Invoke(new AgentToolTrace
+            {
+                Round = 0,
+                Tool = "read_skill",
+                ArgumentsJson = "{\"source\":\"auto_route\"}",
+                Ok = routedSkillResult.Ok,
+                Summary = routedSkillResult.Summary,
+                Preview = TrimTracePreview(routedSkillResult.Content),
+                Handle = routedSkillResult.Handle,
+                ErrorCode = routedSkillResult.ErrorCode
+            });
+            loopMessages.Add(LoopMessage.User("Skill runtime 已根据用户请求预加载 skill。以下内容是本轮必须遵循的 skill 上下文和运行状态：\n\n"
+                + toolResult
+                + "\n\n"
+                + runner.BuildActiveSkillRuntimePrompt()));
+        }
 
         for (var round = 0; round < maxRounds; round++)
         {
@@ -93,6 +117,25 @@ public sealed class AgentChatClient
 
             if (modelReply.ToolCalls.Count == 0)
             {
+                if (runner.TryBuildSkillComplianceNudge(out var skillNudge))
+                {
+                    if (round < maxRounds - 1)
+                    {
+                        loopMessages.Add(LoopMessage.Assistant(reply));
+                        loopMessages.Add(LoopMessage.User(skillNudge));
+                        continue;
+                    }
+
+                    return await FinalizeToolAnswerAsync(
+                        settings,
+                        systemPrompt,
+                        loopMessages.Select(item => new AgentChatMessage { Role = item.Role == "tool" ? "user" : item.Role, Content = item.Content ?? "", Time = DateTime.UtcNow }).ToList(),
+                        userMessage,
+                        toolTrace,
+                        "Skill runtime gate 尚未完成，不能假装已经按 skill 流程产出最终内容。请说明当前卡在什么 gate、已经读取了什么、还缺哪些文件或步骤，并让用户继续触发下一轮。",
+                        cancellationToken);
+                }
+
                 return reply;
             }
 
@@ -147,9 +190,20 @@ public sealed class AgentChatClient
                 loopMessages.Add(LoopMessage.Tool(toolCall.Id, toolResult));
             }
 
+            if (runner.HasActiveSkill)
+            {
+                maxRounds = Math.Max(maxRounds, skillMaxRounds);
+            }
+
             if (round >= maxRounds - 2)
             {
-                loopMessages.Add(LoopMessage.User("工具轮数快到上限。除非绝对必要，不要再调用工具；请基于已有工具结果给用户最终答复。"));
+                var gateWarning = runner.TryBuildSkillComplianceNudge(out var skillNudge)
+                    ? $"{Environment.NewLine}{Environment.NewLine}但当前 skill gate 尚未完成，优先补齐 gate，不要跳过 skill 流程：{Environment.NewLine}{skillNudge}"
+                    : "";
+                var nearLimitPrompt = string.IsNullOrWhiteSpace(gateWarning)
+                    ? "工具轮数快到上限。除非绝对必要，不要再调用工具；请基于已有工具结果给用户最终答复。"
+                    : "工具轮数快到上限。当前仍有 skill gate 未完成时，必须优先补齐 gate，不要直接给最终答复。";
+                loopMessages.Add(LoopMessage.User(nearLimitPrompt + gateWarning));
             }
             else if (blockedAny)
             {
@@ -157,9 +211,17 @@ public sealed class AgentChatClient
             }
             else
             {
-                loopMessages.Add(LoopMessage.User("继续。若已有足够信息，请直接回复用户；只有缺关键事实时才继续调用工具。"));
+                var activeSkillPrompt = runner.BuildActiveSkillRuntimePrompt();
+                var continuePrompt = "继续。若已有足够信息，请直接回复用户；只有缺关键事实时才继续调用工具。";
+                loopMessages.Add(LoopMessage.User(string.IsNullOrWhiteSpace(activeSkillPrompt)
+                    ? continuePrompt
+                    : activeSkillPrompt + Environment.NewLine + Environment.NewLine + continuePrompt));
             }
         }
+
+        var finalInstruction = runner.TryBuildSkillComplianceNudge(out var finalSkillNudge)
+            ? "Skill runtime gate 尚未完成，不能假装已经按 skill 流程产出最终内容。请说明当前卡在什么 gate、已经读取了什么、还缺哪些文件或步骤，并让用户继续触发下一轮。" + Environment.NewLine + finalSkillNudge
+            : "工具轮数已经用完。不要再调用工具，必须基于已有工具结果给用户一个当前最好的答复。";
 
         return await FinalizeToolAnswerAsync(
             settings,
@@ -167,7 +229,7 @@ public sealed class AgentChatClient
             loopMessages.Select(item => new AgentChatMessage { Role = item.Role == "tool" ? "user" : item.Role, Content = item.Content ?? "", Time = DateTime.UtcNow }).ToList(),
             userMessage,
             toolTrace,
-            "工具轮数已经用完。不要再调用工具，必须基于已有工具结果给用户一个当前最好的答复。",
+            finalInstruction,
             cancellationToken);
     }
 
@@ -778,6 +840,7 @@ public sealed class AgentChatClient
             + "- `tool_specs`：查看工具说明和参数。\n"
             + "- `list_skills`：搜索桌宠 workspace 内的 skill。\n"
             + "- `read_skill`：读取并激活某个 skill 的 SKILL.md。\n"
+            + "- `list_skill_files` / `find_skill_files` / `read_skill_file`：读取当前激活 skill 自带资料。\n"
             + "- `list_memories`：列出长期/短期记忆文件路径。\n"
             + "- `read_memory`：读取长期/短期记忆摘要。\n"
             + "- `search_knowledge`：搜索桌宠知识库里的游戏设定、角色资料、剧情摘要。\n"

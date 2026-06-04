@@ -65,6 +65,7 @@ public partial class MainWindow : Window
     private CodexBridgeMessage? activeCodexNotification;
     private AgentChatWindow? agentChatWindow;
     private HomeWindow? homeWindow;
+    private HomeLifeScheduler? homeLifeScheduler;
     private string? lastScheduledTaskOutputPath;
     private IReadOnlyList<HomeActivityPlan>? cachedHomeSchedule;
     private DateTime cachedHomeScheduleExpiresAt = DateTime.MinValue;
@@ -104,6 +105,7 @@ public partial class MainWindow : Window
         Closing += MainWindow_Closing;
         Closed += (_, _) =>
         {
+            homeLifeScheduler?.Stop();
             SystemEvents.DisplaySettingsChanged -= SystemEvents_DisplaySettingsChanged;
             SystemEvents.PowerModeChanged -= SystemEvents_PowerModeChanged;
             SaveUserData();
@@ -119,6 +121,10 @@ public partial class MainWindow : Window
         usageStatistics = usageStatisticsStore.Load();
         assetPack = assetPackLoader.LoadSelectedPack(settings.SelectedAssetPackID);
         reminderScheduler = new ReminderScheduler(settings);
+        homeLifeScheduler = new HomeLifeScheduler(
+            homeLifeStore,
+            BuildHomeActivityScheduleAsync,
+            () => string.IsNullOrWhiteSpace(settings.CatName) ? "爱弥斯" : settings.CatName);
         trayIcon = new TrayIconController(assetPack.DialoguePoses.FirstOrDefault()?.UriSource.LocalPath);
         trayIcon.PetRequested += () => InvokeOnUiThread(() => stateMachine.Pet());
         trayIcon.ToggleStateRequested += () => InvokeOnUiThread(() => stateMachine.ToggleLongDurationState());
@@ -143,6 +149,7 @@ public partial class MainWindow : Window
         reminderTimer.Start();
         statisticsTimer.Start();
         codexBridgeTimer.Start();
+        homeLifeScheduler.Start();
         UpdateTray();
         Dispatcher.BeginInvoke(MaybeShowApiSetupHint, DispatcherPriority.Background);
     }
@@ -913,6 +920,7 @@ public partial class MainWindow : Window
     private void ShowHomeWindow()
     {
         stateMachine.Rest();
+        homeLifeScheduler?.Stop();
 
         if (homeWindow is { IsVisible: true })
         {
@@ -940,6 +948,7 @@ public partial class MainWindow : Window
             homeWindow = null;
             if (!isExitRequested)
             {
+                homeLifeScheduler?.Start();
                 Show();
                 UpdateTray();
             }
@@ -1026,6 +1035,7 @@ public partial class MainWindow : Window
             - read_sofa：坐在沙发旁/客厅里读书。
             - drink_tea：在茶几旁喝茶或喝水。
             - play_game：坐到电竞区玩俄罗斯方块。
+            - cook_kitchen：站在厨房灶台旁煎蛋或做饭。
 
             要求：
             - 结合真实时间、最近行事和爱弥斯人设安排 8 到 12 个动作。
@@ -1083,6 +1093,7 @@ public partial class MainWindow : Window
                 new HomeActivityPlan("drink_tea", $"{settings.CatName}在茶几旁慢慢喝茶。", 10),
                 new HomeActivityPlan("read_sofa", $"{settings.CatName}坐在客厅里读书。", 12),
                 new HomeActivityPlan("study_desk", $"{settings.CatName}背对书桌写小纸条。", 10),
+                new HomeActivityPlan("cook_kitchen", $"{settings.CatName}站在厨房灶台旁煎蛋。", 10),
                 new HomeActivityPlan("play_game", $"{settings.CatName}坐到电竞区玩俄罗斯方块。", 12),
                 new HomeActivityPlan("sleep_bed", $"{settings.CatName}在床上安静小睡。", 15)
             ];
@@ -1093,6 +1104,7 @@ public partial class MainWindow : Window
             new HomeActivityPlan("study_desk", $"{settings.CatName}背对书桌写小纸条。", 10),
             new HomeActivityPlan("read_sofa", $"{settings.CatName}坐在客厅里读书。", 12),
             new HomeActivityPlan("drink_tea", $"{settings.CatName}在茶几旁慢慢喝茶。", 10),
+            new HomeActivityPlan("cook_kitchen", $"{settings.CatName}站在厨房灶台旁煎蛋。", 10),
             new HomeActivityPlan("play_game", $"{settings.CatName}坐到电竞区玩俄罗斯方块。", 12),
             new HomeActivityPlan("sleep_bed", $"{settings.CatName}在床上安静小睡。", 15)
         ];
@@ -1189,12 +1201,13 @@ public partial class MainWindow : Window
         var text = actionId?.Trim().ToLowerInvariant().Replace('-', '_') ?? "";
         return text switch
         {
-            "sleep_bed" or "study_desk" or "read_sofa" or "drink_tea" or "play_game" => text,
+            "sleep_bed" or "study_desk" or "read_sofa" or "drink_tea" or "play_game" or "cook_kitchen" => text,
             "sleep" or "bed" or "nap" => "sleep_bed",
             "desk" or "write_desk" or "read_desk" => "study_desk",
             "sofa" or "read" or "read_book" => "read_sofa",
             "tea" or "water" => "drink_tea",
             "game" or "gaming" or "tetris" => "play_game",
+            "cook" or "cooking" or "kitchen" => "cook_kitchen",
             "walk" => "",
             "idle" or "stand" => "",
             _ => ""

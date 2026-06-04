@@ -2,6 +2,8 @@ using System.IO;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
@@ -23,6 +25,7 @@ public partial class HomeWindow : Window
         ReadCommentHandling = JsonCommentHandling.Skip,
         WriteIndented = true
     };
+    private static readonly JsonSerializerOptions DiagnosticJsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly string petName;
     private readonly Func<CancellationToken, Task<IReadOnlyList<HomeActivityPlan>>> activityPlanner;
@@ -39,8 +42,13 @@ public partial class HomeWindow : Window
     private readonly Dictionary<string, TimeSpan> effectAnimationIntervals;
     private readonly Dictionary<string, HomePlacement> placementOverrides;
     private readonly Dictionary<string, FurnitureConfig> furnitureConfigs;
+    private readonly Dictionary<string, PlacementConfig> pendingPlacementConfigs;
+    private readonly Dictionary<string, FurnitureConfig> pendingFurnitureConfigs;
+    private readonly bool layoutEditorMode;
     private readonly DispatcherTimer activityTimer = new();
+    private readonly DispatcherTimer speechBubbleHideTimer = new() { Interval = TimeSpan.FromSeconds(5) };
     private readonly DispatcherTimer homeLogRefreshTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly DispatcherTimer layoutConfigReloadTimer = new() { Interval = TimeSpan.FromMilliseconds(350) };
     private readonly List<HomeActivityPlan> activitySchedule = [];
     private HomePlacement currentPlacement = HomePlacement.Idle;
     private bool hasRenderedPlacement;
@@ -48,19 +56,29 @@ public partial class HomeWindow : Window
     private HomeLifeEntry? activeHomeLife;
     private HomeActivityPlan? currentActivityPlan;
     private Storyboard? activeMoveStoryboard;
+    private HomePlacement? activeMoveTarget;
     private DispatcherTimer? walkFrameTimer;
     private DispatcherTimer? actionFrameTimer;
     private DispatcherTimer? objectFrameTimer;
     private DispatcherTimer? effectFrameTimer;
+    private FileSystemWatcher? layoutConfigWatcher;
     private int walkFrameIndex;
     private int actionFrameIndex;
     private int objectFrameIndex;
     private int effectFrameIndex;
     private int walkLoopVersion;
     private int actionLoopVersion;
+    private int moveVersion;
     private int activityScheduleIndex;
     private DateTime scheduleStartedAt = DateTime.MinValue;
     private DateTime scheduleExpiresAt = DateTime.MinValue;
+    private readonly Dictionary<string, DebugTarget> debugTargets = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> dirtyDebugTargets = new(StringComparer.OrdinalIgnoreCase);
+    private string? selectedDebugTargetKey;
+    private bool isDebugMode;
+    private System.Windows.Point? debugDragStart;
+    private double debugDragStartLeft;
+    private double debugDragStartTop;
 
     public HomeWindow(
         string petName,
@@ -69,8 +87,10 @@ public partial class HomeWindow : Window
         Action invalidateActivityPlan,
         HomeLifeStore homeLifeStore,
         Action openSettings,
-        Action openChat)
+        Action openChat,
+        bool layoutEditorMode = false)
     {
+        this.layoutEditorMode = layoutEditorMode;
         this.petName = string.IsNullOrWhiteSpace(petName) ? "爱弥斯" : petName.Trim();
         this.activityPlanner = activityPlanner;
         this.invalidateActivityPlan = invalidateActivityPlan;
@@ -79,6 +99,8 @@ public partial class HomeWindow : Window
         this.openChat = openChat;
         placementOverrides = LoadPlacementOverrides();
         furnitureConfigs = LoadFurnitureConfigs();
+        pendingPlacementConfigs = ReadPlacementConfigs(PlacementConfigPath());
+        pendingFurnitureConfigs = new Dictionary<string, FurnitureConfig>(furnitureConfigs, StringComparer.OrdinalIgnoreCase);
         currentPlacement = ResolvePlacement(HomePlacement.Idle);
         homePoses = LoadHomePoses();
         homePoseFrames = LoadHomePoseFrames();
@@ -93,29 +115,207 @@ public partial class HomeWindow : Window
         Title = $"{this.petName}的小屋";
         TitleText.Text = $"{this.petName}的小屋";
         ApplyActivityPose("idle", petImage);
+        InitializeDebugTargets();
+        if (layoutEditorMode)
+        {
+            Title = "小屋布局编辑器";
+            TitleText.Text = "小屋布局编辑器";
+            StatusText.Text = "选择人物动作或家具物品后，可以拖拽、缩放、旋转并保存。";
+            ConfigureLayoutEditorChrome();
+        }
         activityTimer.Tick += async (_, _) =>
         {
             activityTimer.Stop();
             await AdvanceScheduledActivityAsync();
         };
+        speechBubbleHideTimer.Tick += (_, _) => HideHomeSpeechBubble();
         homeLogRefreshTimer.Tick += (_, _) => RefreshHomeLogText();
+        layoutConfigReloadTimer.Tick += (_, _) =>
+        {
+            layoutConfigReloadTimer.Stop();
+            ReloadLayoutConfigsFromDisk();
+        };
         Loaded += async (_, _) =>
         {
             RefreshHomeLogText();
+            if (layoutEditorMode)
+            {
+                SetDebugMode(true);
+                homeLogRefreshTimer.Stop();
+                return;
+            }
+
+            StartLayoutConfigWatcher();
             await RestoreScheduleOrRebuildAsync();
         };
         Closed += (_, _) =>
         {
             activePlanner?.Cancel();
-            SaveCurrentScheduleState();
+            layoutConfigWatcher?.Dispose();
+            if (!layoutEditorMode)
+            {
+                SaveCurrentScheduleState();
+            }
             activeMoveStoryboard?.Stop();
             activityTimer.Stop();
+            speechBubbleHideTimer.Stop();
             homeLogRefreshTimer.Stop();
             StopWalkLoop();
             StopActionLoop();
             StopObjectLoop();
             StopEffectLoop();
         };
+    }
+
+    public static HomeWindow CreateLayoutEditorWindow()
+    {
+        return new HomeWindow(
+            "爱弥斯",
+            null,
+            _ => Task.FromResult<IReadOnlyList<HomeActivityPlan>>(
+                [new HomeActivityPlan("idle", "Layout editor preview", 15)]),
+            () => { },
+            new HomeLifeStore(),
+            () => { },
+            () => { },
+            layoutEditorMode: true);
+    }
+
+    public static HomeWindow CreateDirectDiagnosticWindow(string actionId, bool startDebugMode = false)
+    {
+        var action = string.IsNullOrWhiteSpace(actionId)
+            ? "study_desk"
+            : NormalizeActionId(actionId);
+        if (string.IsNullOrWhiteSpace(action))
+        {
+            action = "study_desk";
+        }
+
+        var plan = new HomeActivityPlan(action, DefaultDiagnosticTextForAction(action), 15);
+        var window = new HomeWindow(
+            "爱弥斯",
+            null,
+            _ => Task.FromResult<IReadOnlyList<HomeActivityPlan>>([plan]),
+            () => { },
+            new HomeLifeStore(),
+            () => { },
+            () => { },
+            layoutEditorMode: false);
+        window.Loaded += (_, _) =>
+        {
+            window.activityTimer.Stop();
+            window.StartScheduledActivity(plan, "direct-diagnostic");
+            if (startDebugMode)
+            {
+                window.SetDebugMode(true);
+                window.StatusText.Text = "正式小屋 Debug 直开诊断";
+            }
+            else
+            {
+                window.StatusText.Text = "正式小屋直开诊断";
+            }
+        };
+        return window;
+    }
+
+    private static string DefaultDiagnosticTextForAction(string actionId)
+    {
+        return actionId switch
+        {
+            "sleep_bed" => "爱弥斯在床上安静小睡。",
+            "study_desk" => "爱弥斯背对书桌写小纸条。",
+            "read_sofa" => "爱弥斯坐在客厅里读书。",
+            "drink_tea" => "爱弥斯在茶几旁慢慢喝茶。",
+            "play_game" => "爱弥斯坐到电竞区玩俄罗斯方块。",
+            "cook_kitchen" => "爱弥斯站在厨房灶台旁煎蛋。",
+            _ => "爱弥斯在小屋里发呆充电。"
+        };
+    }
+
+    private void ConfigureLayoutEditorChrome()
+    {
+        ChatButton.Visibility = Visibility.Collapsed;
+        SettingsButton.Visibility = Visibility.Collapsed;
+        RefreshActivityButton.Visibility = Visibility.Collapsed;
+        ClearBubbleButton.Visibility = Visibility.Collapsed;
+        DebugModeButton.Visibility = Visibility.Collapsed;
+        DebugCookButton.Visibility = Visibility.Collapsed;
+        HomeLogPanel.Visibility = Visibility.Collapsed;
+        ActivityPanel.Visibility = Visibility.Collapsed;
+        HomeSpeechBubble.Visibility = Visibility.Collapsed;
+    }
+
+    private void StartLayoutConfigWatcher()
+    {
+        var directory = Path.GetDirectoryName(PlacementConfigPath());
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(directory);
+        layoutConfigWatcher = new FileSystemWatcher(directory, "*.local.json")
+        {
+            NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName
+        };
+        layoutConfigWatcher.Changed += (_, _) => QueueLayoutConfigReload();
+        layoutConfigWatcher.Created += (_, _) => QueueLayoutConfigReload();
+        layoutConfigWatcher.Renamed += (_, _) => QueueLayoutConfigReload();
+        layoutConfigWatcher.EnableRaisingEvents = true;
+    }
+
+    private void QueueLayoutConfigReload()
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            layoutConfigReloadTimer.Stop();
+            layoutConfigReloadTimer.Start();
+        });
+    }
+
+    private void ReloadLayoutConfigsFromDisk()
+    {
+        CancelActiveMove();
+
+        var reloadedPlacements = TryLoadPlacementOverrides();
+        if (reloadedPlacements is not null)
+        {
+            placementOverrides.Clear();
+            foreach (var (key, placement) in reloadedPlacements)
+            {
+                placementOverrides[key] = placement;
+            }
+
+            if (TryReadPlacementConfigs(PlacementConfigPath()) is { } placementConfigs)
+            {
+                pendingPlacementConfigs.Clear();
+                foreach (var (key, config) in placementConfigs)
+                {
+                    pendingPlacementConfigs[key] = config;
+                }
+            }
+        }
+
+        var reloadedFurniture = TryLoadFurnitureConfigs();
+        if (reloadedFurniture is not null)
+        {
+            furnitureConfigs.Clear();
+            foreach (var (key, config) in reloadedFurniture)
+            {
+                furnitureConfigs[key] = config;
+            }
+
+            pendingFurnitureConfigs.Clear();
+            foreach (var (key, config) in reloadedFurniture)
+            {
+                pendingFurnitureConfigs[key] = config;
+            }
+        }
+
+        ApplyFurnitureConfigs();
+        currentPlacement = ResolvePlacement(currentPlacement);
+        ApplyPlacement(currentPlacement);
+        StartActionLoop(currentPlacement.PoseName);
     }
 
     private void LoadStaticSceneImages()
@@ -126,6 +326,8 @@ public partial class HomeWindow : Window
         StudyDeskLayer.Source = AppImageLoader.TryLoad($"Resources/Home/{HomeResourcePack}/objects/study_desk_front_compact_slot.png");
         GamingDeskLayer.Source = AppImageLoader.TryLoad($"Resources/Home/{HomeResourcePack}/objects/gaming_station_big_screen_slot_mirror.png");
         SofaTableLayer.Source = AppImageLoader.TryLoad($"Resources/Home/{HomeResourcePack}/objects/sofa_reading_slot.png");
+        KitchenStoveLayer.Source = AppImageLoader.TryLoad($"Resources/Home/{HomeResourcePack}/objects/kitchen_stove_idle.png");
+        SofaPlushLayer.Source = AppImageLoader.TryLoad($"Resources/Home/{HomeResourcePack}/objects/sofa_plush.png");
         TeaTableLayer.Source = AppImageLoader.TryLoad($"Resources/Home/{HomeResourcePack}/objects/tea_table_slot.png");
     }
 
@@ -149,14 +351,17 @@ public partial class HomeWindow : Window
         openChat();
     }
 
+    private void ClearBubble_Click(object sender, RoutedEventArgs e)
+    {
+        HideHomeSpeechBubble();
+    }
+
     public bool HandleChatStarted(string userMessage)
     {
         StatusText.Text = "正在小屋里对话";
         if (ShouldResumeOwnBusiness(userMessage))
         {
-            HomeSpeechText.Text = "好哦，那我继续忙自己的事。";
-            HomeSpeechBubble.Visibility = Visibility.Visible;
-            PositionSpeechBubbleNearPet();
+            ShowHomeSpeechBubble("好哦，那我继续忙自己的事。");
             StatusText.Text = "继续小屋生活";
             return true;
         }
@@ -184,10 +389,7 @@ public partial class HomeWindow : Window
 
     public void ShowChatReply(string reply)
     {
-        var text = string.IsNullOrWhiteSpace(reply) ? "嗯？我刚刚有点走神。" : reply.Trim();
-        HomeSpeechBubble.Visibility = Visibility.Visible;
-        HomeSpeechText.Text = text.Length > 96 ? text[..96] + "..." : text;
-        PositionSpeechBubbleNearPet();
+        ShowHomeSpeechBubble(reply);
         StatusText.Text = "已在小屋内回复";
     }
 
@@ -446,6 +648,11 @@ public partial class HomeWindow : Window
         }
 
         var text = activity.DisplayText.ToLowerInvariant();
+        if (text.Contains("cook") || text.Contains("kitchen") || text.Contains("做饭") || text.Contains("厨房") || text.Contains("煎蛋") || text.Contains("炒"))
+        {
+            return HomePlacement.CookKitchen;
+        }
+
         if (text.Contains("game") || text.Contains("tetris") || text.Contains("\u6e38\u620f") || text.Contains("\u7535\u7ade") || text.Contains("\u4fc4\u7f57\u65af\u65b9\u5757") || text.Contains("\u7535\u8111"))
         {
             return HomePlacement.PlayGame;
@@ -492,14 +699,26 @@ public partial class HomeWindow : Window
         return text switch
         {
             "idle" => "idle_front",
+            "idle_front" => "idle_front",
             "stand" => "idle_front",
+            "sleep_bed_anchor_slot" => "sleep_bed",
             "sit_bed" => "sleep_bed",
             "write_desk" => "study_desk",
+            "study_desk_chair_back_anchor" => "study_desk",
             "read_desk_back" => "study_desk",
             "read_desk_back_anchor" => "study_desk",
+            "drink_tea_anchor_slot" => "drink_tea",
             "drink_tea_anchor" => "drink_tea",
+            "read_sofa_anchor_slot" => "read_sofa",
             "read_sofa_anchor" => "read_sofa",
+            "play_game_anchor_slot" => "play_game",
             "play_game_anchor" => "play_game",
+            "cook_kitchen_anchor_slot" => "cook_kitchen",
+            "cook" => "cook_kitchen",
+            "cooking" => "cook_kitchen",
+            "kitchen" => "cook_kitchen",
+            "walk_left" => "",
+            "walk_right" => "",
             "walk" => "",
             _ => text
         };
@@ -514,6 +733,7 @@ public partial class HomeWindow : Window
             "read_sofa" => HomePlacement.ReadSofa,
             "drink_tea" => HomePlacement.DrinkTea,
             "play_game" => HomePlacement.PlayGame,
+            "cook_kitchen" => HomePlacement.CookKitchen,
             "idle_front" => HomePlacement.Idle,
             _ => HomePlacement.Idle
         };
@@ -541,6 +761,11 @@ public partial class HomeWindow : Window
         if (!LooksLikeActivityInstruction(text))
         {
             return null;
+        }
+
+        if (ContainsAny(text, "做饭", "厨房", "煎蛋", "炒菜", "cook", "kitchen"))
+        {
+            return new HomeActivityPlan("cook_kitchen", $"{petName}站在厨房灶台旁煎蛋。", 12);
         }
 
         if (ContainsAny(text, "俄罗斯方块", "电竞", "打游戏", "玩游戏", "game", "tetris", "电脑"))
@@ -649,6 +874,22 @@ public partial class HomeWindow : Window
         Canvas.SetTop(HomeSpeechBubble, bubbleTop);
     }
 
+    private void ShowHomeSpeechBubble(string text)
+    {
+        var value = string.IsNullOrWhiteSpace(text) ? "嗯？我刚刚有点走神。" : text.Trim();
+        HomeSpeechText.Text = value.Length > 96 ? value[..96] + "..." : value;
+        HomeSpeechBubble.Visibility = Visibility.Visible;
+        PositionSpeechBubbleNearPet();
+        speechBubbleHideTimer.Stop();
+        speechBubbleHideTimer.Start();
+    }
+
+    private void HideHomeSpeechBubble()
+    {
+        speechBubbleHideTimer.Stop();
+        HomeSpeechBubble.Visibility = Visibility.Collapsed;
+    }
+
     private static string NormalizeActivityText(string text)
     {
         var value = string.IsNullOrWhiteSpace(text) ? "爱弥斯在小屋里发呆充电。" : text.Trim();
@@ -687,6 +928,7 @@ public partial class HomeWindow : Window
             "read_sofa" => ContainsAny(text, "床上", "书桌", "茶几", "电竞", "俄罗斯方块"),
             "drink_tea" => ContainsAny(text, "床", "沙发上", "书桌", "电竞", "俄罗斯方块"),
             "play_game" => ContainsAny(text, "床", "沙发", "茶几旁喝茶", "书桌"),
+            "cook_kitchen" => ContainsAny(text, "床", "沙发", "茶几", "书桌", "电竞", "俄罗斯方块"),
             _ => false
         };
     }
@@ -700,13 +942,14 @@ public partial class HomeWindow : Window
             "read_sofa" => $"{petName}坐在客厅里读书。",
             "drink_tea" => $"{petName}在茶几旁慢慢喝茶。",
             "play_game" => $"{petName}坐到电竞区玩俄罗斯方块。",
+            "cook_kitchen" => $"{petName}站在厨房灶台旁煎蛋。",
             _ => $"{petName}在小屋里发呆充电。"
         };
     }
 
     private static bool IsScheduledActionId(string actionId)
     {
-        return actionId is "sleep_bed" or "study_desk" or "read_sofa" or "drink_tea" or "play_game";
+        return actionId is "sleep_bed" or "study_desk" or "read_sofa" or "drink_tea" or "play_game" or "cook_kitchen";
     }
 
     private ImageSource? GetPose(string name)
@@ -722,8 +965,9 @@ public partial class HomeWindow : Window
     private void MoveToPlacement(HomePlacement target, ImageSource? fallback)
     {
         StopActionLoop();
-        activeMoveStoryboard?.Stop();
+        CancelActiveMove();
         var from = currentPlacement;
+        activeMoveTarget = target;
         var currentLeft = Canvas.GetLeft(PetImage);
         var currentTop = Canvas.GetTop(PetImage);
         if (double.IsNaN(currentLeft) || double.IsNaN(currentTop))
@@ -752,6 +996,7 @@ public partial class HomeWindow : Window
         var duration = TimeSpan.FromMilliseconds(Math.Clamp(distance * 2.3, 900, 2600));
         var easing = new CubicEase { EasingMode = EasingMode.EaseInOut };
         var storyboard = new Storyboard();
+        var currentMoveVersion = ++moveVersion;
 
         var leftAnimation = new DoubleAnimation(currentLeft, walkTargetLeft, duration) { EasingFunction = easing };
         Storyboard.SetTarget(leftAnimation, PetImage);
@@ -765,8 +1010,14 @@ public partial class HomeWindow : Window
 
         storyboard.Completed += (_, _) =>
         {
+            if (currentMoveVersion != moveVersion)
+            {
+                return;
+            }
+
             StopWalkLoop();
             currentPlacement = target;
+            activeMoveTarget = null;
             ApplyPlacement(target);
             StartActionLoop(target.PoseName);
             if (HomeSpeechBubble.Visibility == Visibility.Visible)
@@ -778,13 +1029,32 @@ public partial class HomeWindow : Window
         storyboard.Begin();
     }
 
+    private void CancelActiveMove()
+    {
+        moveVersion++;
+        activeMoveStoryboard?.Stop();
+        activeMoveStoryboard = null;
+        activeMoveTarget = null;
+        ClearPetPlacementAnimations();
+        StopWalkLoop();
+    }
+
     private void ApplyPlacement(HomePlacement placement)
     {
+        ClearPetPlacementAnimations();
         PetImage.Width = placement.Width;
         PetImage.Height = placement.Height;
         System.Windows.Controls.Panel.SetZIndex(PetImage, placement.ZIndex);
         Canvas.SetLeft(PetImage, placement.CenterX - placement.Width / 2);
         Canvas.SetTop(PetImage, placement.BottomY - placement.Height);
+        ApplyElementRotation(PetImage, placement.Rotation);
+        WritePlacementDiagnostic("apply-placement", placement);
+    }
+
+    private void ClearPetPlacementAnimations()
+    {
+        PetImage.BeginAnimation(Canvas.LeftProperty, null);
+        PetImage.BeginAnimation(Canvas.TopProperty, null);
     }
 
     private void ApplyFurnitureConfigs()
@@ -793,6 +1063,8 @@ public partial class HomeWindow : Window
         ApplyFurnitureConfig(StudyDeskLayer, Furniture("study_desk"));
         ApplyFurnitureConfig(GamingDeskLayer, Furniture("gaming_desk"));
         ApplyFurnitureConfig(SofaTableLayer, Furniture("sofa_table"));
+        ApplyFurnitureConfig(KitchenStoveLayer, Furniture("kitchen_stove_idle"));
+        ApplyFurnitureConfig(SofaPlushLayer, Furniture("sofa_plush"));
         ApplyFurnitureConfig(TeaTableLayer, Furniture("tea_table"));
     }
 
@@ -832,6 +1104,651 @@ public partial class HomeWindow : Window
         System.Windows.Controls.Panel.SetZIndex(
             element,
             config.ZIndex ?? System.Windows.Controls.Panel.GetZIndex(element));
+        ApplyElementRotation(element, config.Rotation ?? 0);
+    }
+
+    private static void ApplyElementRotation(FrameworkElement element, double rotation)
+    {
+        element.RenderTransformOrigin = new System.Windows.Point(0.5, 0.5);
+        element.RenderTransform = Math.Abs(rotation) > 0.001
+            ? new RotateTransform(rotation)
+            : Transform.Identity;
+    }
+
+    private void InitializeDebugTargets()
+    {
+        debugTargets.Clear();
+        AddFurnitureDebugTarget("bed", "床", BedLayer);
+        AddFurnitureDebugTarget("study_desk", "书桌", StudyDeskLayer);
+        AddFurnitureDebugTarget("gaming_desk", "游戏桌", GamingDeskLayer);
+        AddFurnitureDebugTarget("sofa_table", "沙发和茶几", SofaTableLayer);
+        AddFurnitureDebugTarget("tea_table", "茶桌", TeaTableLayer);
+        AddFurnitureDebugTarget("kitchen_stove_idle", "灶台默认", KitchenStoveLayer);
+        AddFurnitureDebugTarget("kitchen_stove_cooking", "灶台煎蛋动画", ObjectAnimationImage);
+        AddFurnitureDebugTarget("sofa_plush", "沙发玩偶", SofaPlushLayer);
+        AddFurnitureDebugTarget("tea_smoke", "喝茶烟雾特效", EffectAnimationImage);
+
+        AddPlacementDebugTarget(HomePlacement.Idle.ConfigKey!, "站立待机");
+        AddPlacementDebugTarget(HomePlacement.ReadSofa.ConfigKey!, "沙发读书");
+        AddPlacementDebugTarget(HomePlacement.DrinkTea.ConfigKey!, "喝茶");
+        AddPlacementDebugTarget(HomePlacement.PlayGame.ConfigKey!, "打游戏");
+        AddPlacementDebugTarget(HomePlacement.CookKitchen.ConfigKey!, "做饭煎蛋");
+        AddPlacementDebugTarget(HomePlacement.SitBed.ConfigKey!, "坐在床边");
+        AddPlacementDebugTarget(HomePlacement.SleepBed.ConfigKey!, "床上睡觉");
+        AddPlacementDebugTarget(HomePlacement.WriteDesk.ConfigKey!, "书桌写字");
+        AddPlacementDebugTarget(HomePlacement.WalkHallLeft.ConfigKey!, "向左走路");
+        AddPlacementDebugTarget(HomePlacement.WalkHallRight.ConfigKey!, "向右走路");
+
+        DebugPlacementCombo.ItemsSource = debugTargets.Values
+            .Where(target => target.IsPlacement)
+            .OrderBy(target => target.Label)
+            .ToList();
+        DebugFurnitureCombo.ItemsSource = debugTargets.Values
+            .Where(target => !target.IsPlacement)
+            .OrderBy(target => target.Label)
+            .ToList();
+        DebugPlacementCombo.SelectedValue = HomePlacement.Idle.ConfigKey;
+        DebugFurnitureCombo.SelectedValue = "kitchen_stove_idle";
+
+        foreach (var target in debugTargets.Values.Where(target => !target.IsPlacement))
+        {
+            AttachDebugMouse(target.Element);
+        }
+
+        AttachDebugMouse(PetImage);
+    }
+
+    private void AddFurnitureDebugTarget(string key, string label, FrameworkElement element)
+    {
+        debugTargets[key] = new DebugTarget(key, label, element, IsPlacement: false);
+    }
+
+    private void AddPlacementDebugTarget(string key, string label)
+    {
+        debugTargets[key] = new DebugTarget(key, label, PetImage, IsPlacement: true);
+    }
+
+    private void AttachDebugMouse(FrameworkElement element)
+    {
+        element.MouseLeftButtonDown += DebugTarget_MouseLeftButtonDown;
+        element.MouseMove += DebugTarget_MouseMove;
+        element.MouseLeftButtonUp += DebugTarget_MouseLeftButtonUp;
+    }
+
+    private void ToggleDebugMode_Click(object sender, RoutedEventArgs e)
+    {
+        SetDebugMode(!isDebugMode);
+    }
+
+    private void SetDebugMode(bool enabled)
+    {
+        isDebugMode = enabled;
+        DebugPanel.Visibility = isDebugMode ? Visibility.Visible : Visibility.Collapsed;
+        SetDebugHitTesting(isDebugMode);
+        if (isDebugMode)
+        {
+            FreezeCurrentPoseForDebug();
+            SelectDebugTarget(CurrentPlacementDebugKey());
+        }
+        else
+        {
+            selectedDebugTargetKey = null;
+            DebugSelectionBorder.Visibility = Visibility.Collapsed;
+            DebugResizeThumb.Visibility = Visibility.Collapsed;
+            DebugRotateThumb.Visibility = Visibility.Collapsed;
+            if (ObjectAnimationImage.Visibility == Visibility.Visible && currentPlacement.PoseName != "cook_kitchen_anchor_slot")
+            {
+                StopObjectLoop();
+            }
+
+            if (!layoutEditorMode && currentActivityPlan is not null)
+            {
+                ScheduleNextActivity(currentActivityPlan);
+            }
+        }
+    }
+
+    private void FreezeCurrentPoseForDebug()
+    {
+        if (layoutEditorMode)
+        {
+            return;
+        }
+
+        activityTimer.Stop();
+        var target = activeMoveTarget;
+        CancelActiveMove();
+        if (target is null)
+        {
+            return;
+        }
+
+        currentPlacement = target;
+        ApplyPlacement(target);
+        hasRenderedPlacement = true;
+        StartActionLoop(target.PoseName);
+    }
+
+    private string CurrentPlacementDebugKey()
+    {
+        var key = currentPlacement.ConfigKey ?? NormalizeActionId(currentPlacement.PoseName);
+        return !string.IsNullOrWhiteSpace(key) && debugTargets.ContainsKey(key)
+            ? key
+            : HomePlacement.Idle.ConfigKey ?? "idle_front";
+    }
+
+    private void SetDebugHitTesting(bool enabled)
+    {
+        foreach (var target in debugTargets.Values.Where(target => !target.IsPlacement))
+        {
+            target.Element.IsHitTestVisible = enabled;
+        }
+
+        PetImage.IsHitTestVisible = enabled;
+    }
+
+    private void DebugPlacementCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!isDebugMode)
+        {
+            return;
+        }
+
+        SelectDebugTarget(DebugPlacementCombo.SelectedValue as string);
+    }
+
+    private void DebugFurnitureCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!isDebugMode)
+        {
+            return;
+        }
+
+        SelectDebugTarget(DebugFurnitureCombo.SelectedValue as string);
+    }
+
+    private void SelectDebugTarget(string? key)
+    {
+        if (string.IsNullOrWhiteSpace(key) || !debugTargets.TryGetValue(key, out var target))
+        {
+            return;
+        }
+
+        if (selectedDebugTargetKey is not null
+            && !string.Equals(selectedDebugTargetKey, key, StringComparison.OrdinalIgnoreCase))
+        {
+            CaptureSelectedDebugTarget();
+        }
+
+        selectedDebugTargetKey = key;
+        SyncDebugTargetSelection(target);
+        PreviewDebugTarget(target);
+        UpdateDebugSelectionAdorners();
+        UpdateDebugInfoText();
+    }
+
+    private void SyncDebugTargetSelection(DebugTarget target)
+    {
+        if (target.IsPlacement)
+        {
+            if (!string.Equals(DebugPlacementCombo.SelectedValue as string, target.Key, StringComparison.OrdinalIgnoreCase))
+            {
+                DebugPlacementCombo.SelectedValue = target.Key;
+            }
+        }
+        else if (!string.Equals(DebugFurnitureCombo.SelectedValue as string, target.Key, StringComparison.OrdinalIgnoreCase))
+        {
+            DebugFurnitureCombo.SelectedValue = target.Key;
+        }
+    }
+
+    private void PreviewDebugTarget(DebugTarget target)
+    {
+        if (target.IsPlacement)
+        {
+            var placement = ResolvePlacement(FindDefaultPlacement(target.Key) ?? HomePlacement.Idle);
+            currentPlacement = placement;
+            ApplyPlacement(placement);
+            hasRenderedPlacement = true;
+            StartActionLoop(placement.PoseName);
+
+            if (layoutEditorMode)
+            {
+                StatusText.Text = $"正在编辑人物动作：{target.Label}";
+            }
+            else
+            {
+                StatusText.Text = $"正在调试人物动作：{target.Label}";
+            }
+
+            return;
+        }
+
+        if (string.Equals(target.Key, "kitchen_stove_cooking", StringComparison.OrdinalIgnoreCase))
+        {
+            StopEffectLoop();
+            var config = Furniture("kitchen_stove_cooking");
+            ApplyFurnitureConfig(ObjectAnimationImage, config);
+            if (objectAnimationFrames.TryGetValue("kitchen_stove_cooking_v13", out var frames) && frames.Count > 0)
+            {
+                ObjectAnimationImage.Source = frames[0];
+            }
+            ObjectAnimationImage.Visibility = Visibility.Visible;
+            KitchenStoveLayer.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        if (string.Equals(target.Key, "tea_smoke", StringComparison.OrdinalIgnoreCase))
+        {
+            StopObjectLoop();
+            var config = Furniture("tea_smoke");
+            ApplyFurnitureConfig(EffectAnimationImage, config);
+            if (effectAnimationFrames.TryGetValue("tea_smoke", out var frames) && frames.Count > 0)
+            {
+                EffectAnimationImage.Source = frames[0];
+            }
+            EffectAnimationImage.Visibility = Visibility.Visible;
+            return;
+        }
+
+        StopObjectLoop();
+        StopEffectLoop();
+    }
+
+    private DebugTarget? SelectedDebugTarget()
+    {
+        return selectedDebugTargetKey is not null && debugTargets.TryGetValue(selectedDebugTargetKey, out var target)
+            ? target
+            : null;
+    }
+
+    private void DebugTarget_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (!isDebugMode || sender is not FrameworkElement element)
+        {
+            return;
+        }
+
+        var target = DebugTargetForElement(element);
+        if (target is null)
+        {
+            return;
+        }
+
+        selectedDebugTargetKey = target.Key;
+        SyncDebugTargetSelection(target);
+        debugDragStart = e.GetPosition(SceneCanvas);
+        debugDragStartLeft = Canvas.GetLeft(target.Element);
+        debugDragStartTop = Canvas.GetTop(target.Element);
+        target.Element.CaptureMouse();
+        e.Handled = true;
+        UpdateDebugSelectionAdorners();
+    }
+
+    private DebugTarget? DebugTargetForElement(FrameworkElement element)
+    {
+        var selected = SelectedDebugTarget();
+        if (element == PetImage && selected?.IsPlacement == true)
+        {
+            return selected;
+        }
+
+        return debugTargets.Values.FirstOrDefault(target => !target.IsPlacement && target.Element == element);
+    }
+
+    private void DebugTarget_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        var target = SelectedDebugTarget();
+        if (!isDebugMode || target is null || debugDragStart is null || !target.Element.IsMouseCaptured)
+        {
+            return;
+        }
+
+        var current = e.GetPosition(SceneCanvas);
+        Canvas.SetLeft(target.Element, debugDragStartLeft + current.X - debugDragStart.Value.X);
+        Canvas.SetTop(target.Element, debugDragStartTop + current.Y - debugDragStart.Value.Y);
+        MarkDebugTargetDirty(target);
+        UpdateDebugSelectionAdorners();
+        UpdateDebugInfoText();
+    }
+
+    private void DebugTarget_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        var target = SelectedDebugTarget();
+        if (target is null)
+        {
+            return;
+        }
+
+        target.Element.ReleaseMouseCapture();
+        debugDragStart = null;
+        UpdateDebugInfoText();
+    }
+
+    private void DebugResizeThumb_DragDelta(object sender, DragDeltaEventArgs e)
+    {
+        var target = SelectedDebugTarget();
+        if (target is null)
+        {
+            return;
+        }
+
+        target.Element.Width = Math.Max(12, target.Element.Width + e.HorizontalChange);
+        target.Element.Height = Math.Max(12, target.Element.Height + e.VerticalChange);
+        MarkDebugTargetDirty(target);
+        UpdateDebugSelectionAdorners();
+        UpdateDebugInfoText();
+    }
+
+    private void DebugRotateThumb_DragDelta(object sender, DragDeltaEventArgs e)
+    {
+        var target = SelectedDebugTarget();
+        if (target is null)
+        {
+            return;
+        }
+
+        ApplyElementRotation(target.Element, GetElementRotation(target.Element) + e.HorizontalChange);
+        MarkDebugTargetDirty(target);
+        UpdateDebugSelectionAdorners();
+        UpdateDebugInfoText();
+    }
+
+    private void MarkDebugTargetDirty(DebugTarget target)
+    {
+        dirtyDebugTargets.Add(target.Key);
+    }
+
+    private void DebugThumb_DragCompleted(object sender, DragCompletedEventArgs e)
+    {
+        UpdateDebugInfoText();
+    }
+
+    private void UpdateDebugSelectionAdorners()
+    {
+        var target = SelectedDebugTarget();
+        if (!isDebugMode || target is null)
+        {
+            DebugSelectionBorder.Visibility = Visibility.Collapsed;
+            DebugResizeThumb.Visibility = Visibility.Collapsed;
+            DebugRotateThumb.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var left = Canvas.GetLeft(target.Element);
+        var top = Canvas.GetTop(target.Element);
+        DebugSelectionBorder.Width = target.Element.Width;
+        DebugSelectionBorder.Height = target.Element.Height;
+        Canvas.SetLeft(DebugSelectionBorder, left);
+        Canvas.SetTop(DebugSelectionBorder, top);
+        ApplyElementRotation(DebugSelectionBorder, GetElementRotation(target.Element));
+        DebugSelectionBorder.Visibility = Visibility.Visible;
+
+        Canvas.SetLeft(DebugResizeThumb, left + target.Element.Width - DebugResizeThumb.Width / 2);
+        Canvas.SetTop(DebugResizeThumb, top + target.Element.Height - DebugResizeThumb.Height / 2);
+        DebugResizeThumb.Visibility = Visibility.Visible;
+
+        Canvas.SetLeft(DebugRotateThumb, left + target.Element.Width / 2 - DebugRotateThumb.Width / 2);
+        Canvas.SetTop(DebugRotateThumb, top - 36);
+        DebugRotateThumb.Visibility = Visibility.Visible;
+    }
+
+    private static double GetElementRotation(FrameworkElement element)
+    {
+        return element.RenderTransform is RotateTransform rotate ? rotate.Angle : 0;
+    }
+
+    private void UpdateDebugInfoText()
+    {
+        var target = SelectedDebugTarget();
+        if (target is null)
+        {
+            DebugInfoText.Text = "还没有选择目标。";
+            return;
+        }
+
+        var left = Canvas.GetLeft(target.Element);
+        var top = Canvas.GetTop(target.Element);
+        var configPath = target.IsPlacement ? PlacementConfigPath() : FurnitureConfigPath();
+        var extra = DebugConfigSnapshotText(target);
+
+        DebugInfoText.Text =
+            $"{target.Label}({target.Key})：左={left:0.##}，上={top:0.##}，宽={target.Element.Width:0.##}，高={target.Element.Height:0.##}，旋转={GetElementRotation(target.Element):0.##}{extra}；配置={configPath}";
+    }
+
+    private string DebugConfigSnapshotText(DebugTarget target)
+    {
+        if (target.IsPlacement)
+        {
+            var actionKey = currentPlacement.ConfigKey ?? NormalizeActionId(currentPlacement.PoseName);
+            if (pendingPlacementConfigs.TryGetValue(target.Key, out var config))
+            {
+                var savedWidth = config.Width ?? target.Element.Width;
+                var savedHeight = config.Height ?? target.Element.Height;
+                var savedLeft = (config.CenterX ?? 0) - savedWidth / 2;
+                var savedTop = (config.BottomY ?? 0) - savedHeight;
+                return $"；配置左={savedLeft:0.##}，上={savedTop:0.##}，宽={savedWidth:0.##}，高={savedHeight:0.##}；当前动作={actionKey} / {currentPlacement.PoseName}";
+            }
+
+            return $"；未找到该人物配置；当前动作={actionKey} / {currentPlacement.PoseName}";
+        }
+
+        if (pendingFurnitureConfigs.TryGetValue(target.Key, out var furniture))
+        {
+            return $"；配置左={furniture.Left:0.##}，上={furniture.Top:0.##}，宽={furniture.Width:0.##}，高={furniture.Height:0.##}";
+        }
+
+        return "；未找到该家具配置";
+    }
+
+    private void WriteSelectedDebugTargetDiagnostic(string source)
+    {
+        var target = SelectedDebugTarget();
+        if (target?.IsPlacement != true)
+        {
+            return;
+        }
+
+        WritePlacementDiagnostic(source, currentPlacement, target.Key);
+    }
+
+    private void WritePlacementDiagnostic(string source, HomePlacement placement, string? selectedKey = null)
+    {
+        try
+        {
+            var key = selectedKey ?? placement.ConfigKey ?? NormalizeActionId(placement.PoseName);
+            PlacementConfig? saved = null;
+            if (!string.IsNullOrWhiteSpace(key))
+            {
+                pendingPlacementConfigs.TryGetValue(key, out saved);
+            }
+
+            var savedWidth = saved?.Width ?? placement.Width;
+            var savedHeight = saved?.Height ?? placement.Height;
+            var savedLeft = (saved?.CenterX ?? placement.CenterX) - savedWidth / 2;
+            var savedTop = (saved?.BottomY ?? placement.BottomY) - savedHeight;
+            var left = Canvas.GetLeft(PetImage);
+            var top = Canvas.GetTop(PetImage);
+
+            var entry = new
+            {
+                time = DateTime.Now.ToString("O"),
+                source,
+                layoutEditorMode,
+                selectedKey = key,
+                placementPose = placement.PoseName,
+                placementConfigKey = placement.ConfigKey,
+                currentPose = currentPlacement.PoseName,
+                currentConfigKey = currentPlacement.ConfigKey,
+                actual = new
+                {
+                    left,
+                    top,
+                    width = PetImage.Width,
+                    height = PetImage.Height,
+                    zIndex = System.Windows.Controls.Panel.GetZIndex(PetImage),
+                    rotation = GetElementRotation(PetImage)
+                },
+                expected = new
+                {
+                    left = savedLeft,
+                    top = savedTop,
+                    width = savedWidth,
+                    height = savedHeight,
+                    centerX = saved?.CenterX ?? placement.CenterX,
+                    bottomY = saved?.BottomY ?? placement.BottomY,
+                    zIndex = saved?.ZIndex ?? placement.ZIndex,
+                    rotation = saved?.Rotation ?? placement.Rotation
+                },
+                placementConfigPath = PlacementConfigPath(),
+                furnitureConfigPath = FurnitureConfigPath()
+            };
+
+            var path = LayoutDiagnosticPath();
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.AppendAllText(path, JsonSerializer.Serialize(entry, DiagnosticJsonOptions) + Environment.NewLine);
+        }
+        catch
+        {
+            // Diagnostics must never affect the home scene.
+        }
+    }
+
+    private void SaveDebugLayout_Click(object sender, RoutedEventArgs e)
+    {
+        CaptureSelectedDebugTarget();
+        SaveAllDebugTargets();
+    }
+
+    private void SaveSelectedDebugTarget()
+    {
+        CaptureSelectedDebugTarget();
+        SaveAllDebugTargets();
+    }
+
+    private void CaptureSelectedDebugTarget()
+    {
+        var target = SelectedDebugTarget();
+        if (target is null)
+        {
+            return;
+        }
+
+        if (!dirtyDebugTargets.Contains(target.Key))
+        {
+            return;
+        }
+
+        if (target.IsPlacement)
+        {
+            pendingPlacementConfigs[target.Key] = BuildPlacementConfig(target.Element);
+        }
+        else
+        {
+            pendingFurnitureConfigs[target.Key] = BuildFurnitureConfig(target);
+        }
+    }
+
+    private void SaveAllDebugTargets()
+    {
+        WriteFurnitureConfigs(pendingFurnitureConfigs);
+        foreach (var (key, config) in pendingFurnitureConfigs)
+        {
+            furnitureConfigs[key] = config;
+        }
+
+        var placementPath = PlacementConfigPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(placementPath)!);
+        WriteJsonAtomically(placementPath, pendingPlacementConfigs);
+        foreach (var (key, config) in pendingPlacementConfigs)
+        {
+            if (FindDefaultPlacement(key) is not { } placement)
+            {
+                continue;
+            }
+
+            var configured = ApplyPlacementConfig(placement, config);
+            placementOverrides[key] = configured;
+            placementOverrides[configured.PoseName] = configured;
+        }
+
+        dirtyDebugTargets.Clear();
+        DebugInfoText.Text = $"已保存到：{Path.GetDirectoryName(PlacementConfigPath())}";
+        WriteSelectedDebugTargetDiagnostic("save-layout");
+    }
+
+    private static FurnitureConfig BuildFurnitureConfig(DebugTarget target)
+    {
+        return new FurnitureConfig
+        {
+            Left = Canvas.GetLeft(target.Element),
+            Top = Canvas.GetTop(target.Element),
+            Width = target.Element.Width,
+            Height = target.Element.Height,
+            ZIndex = System.Windows.Controls.Panel.GetZIndex(target.Element),
+            Rotation = GetElementRotation(target.Element)
+        };
+    }
+
+    private static PlacementConfig BuildPlacementConfig(FrameworkElement element)
+    {
+        return new PlacementConfig
+        {
+            CenterX = Canvas.GetLeft(element) + element.Width / 2,
+            BottomY = Canvas.GetTop(element) + element.Height,
+            Width = element.Width,
+            Height = element.Height,
+            ZIndex = System.Windows.Controls.Panel.GetZIndex(element),
+            Rotation = GetElementRotation(element)
+        };
+    }
+
+    private static Dictionary<string, PlacementConfig> ReadPlacementConfigs(string path)
+    {
+        return TryReadPlacementConfigs(path) ?? DefaultPlacementConfigs();
+    }
+
+    private static Dictionary<string, PlacementConfig>? TryReadPlacementConfigs(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return DefaultPlacementConfigs();
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<Dictionary<string, PlacementConfig>>(
+                File.ReadAllText(path),
+                PlacementJsonOptions) ?? DefaultPlacementConfigs();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static void WriteFurnitureConfigs(Dictionary<string, FurnitureConfig> configs)
+    {
+        var path = FurnitureConfigPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        WriteJsonAtomically(path, configs);
+    }
+
+    private static void WriteJsonAtomically<T>(string path, T value)
+    {
+        var directory = Path.GetDirectoryName(path)!;
+        Directory.CreateDirectory(directory);
+        var tempPath = Path.Combine(directory, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+        File.WriteAllText(tempPath, JsonSerializer.Serialize(value, PlacementJsonOptions));
+        File.Move(tempPath, path, overwrite: true);
+    }
+
+    private void DebugCook_Click(object sender, RoutedEventArgs e)
+    {
+        var plan = new HomeActivityPlan("cook_kitchen", $"{petName}站在厨房灶台旁煎蛋。", 12);
+        ApplyActivityPose(plan);
+        ActivityText.Text = plan.DisplayText;
+        StatusText.Text = "做饭动作预览";
     }
 
     private HomePlacement ResolvePlacement(HomePlacement placement)
@@ -1123,25 +2040,32 @@ public partial class HomeWindow : Window
         if (string.Equals(poseName, "study_desk_chair_back_anchor", StringComparison.OrdinalIgnoreCase))
         {
             var furniture = Furniture("study_desk");
-            StartObjectLoop("study_desk_page_flip", furniture.Left!.Value, furniture.Top!.Value, furniture.Width!.Value, furniture.Height!.Value);
+            StartObjectLoop("study_desk_page_flip", furniture);
             return;
         }
 
         if (string.Equals(poseName, "play_game_anchor_slot", StringComparison.OrdinalIgnoreCase))
         {
             var furniture = Furniture("gaming_desk");
-            StartObjectLoop("gaming_station_tetris_v3", furniture.Left!.Value, furniture.Top!.Value, furniture.Width!.Value, furniture.Height!.Value);
+            StartObjectLoop("gaming_station_tetris_v3", furniture);
+            return;
+        }
+
+        if (string.Equals(poseName, "cook_kitchen_anchor_slot", StringComparison.OrdinalIgnoreCase))
+        {
+            var furniture = Furniture("kitchen_stove_cooking");
+            StartObjectLoop("kitchen_stove_cooking_v13", furniture);
             return;
         }
 
         if (string.Equals(poseName, "drink_tea_anchor_slot", StringComparison.OrdinalIgnoreCase))
         {
             var smoke = TeaSmokeBounds();
-            StartEffectLoop("tea_smoke", smoke.Left!.Value, smoke.Top!.Value, smoke.Width!.Value, smoke.Height!.Value);
+            StartEffectLoop("tea_smoke", smoke);
         }
     }
 
-    private void StartObjectLoop(string animationName, double left, double top, double width, double height)
+    private void StartObjectLoop(string animationName, FurnitureConfig bounds)
     {
         StopObjectLoop();
         if (!objectAnimationFrames.TryGetValue(animationName, out var frames) || frames.Count == 0)
@@ -1159,10 +2083,12 @@ public partial class HomeWindow : Window
             StudyDeskLayer.Visibility = Visibility.Collapsed;
         }
 
-        Canvas.SetLeft(ObjectAnimationImage, left);
-        Canvas.SetTop(ObjectAnimationImage, top);
-        ObjectAnimationImage.Width = width;
-        ObjectAnimationImage.Height = height;
+        if (string.Equals(animationName, "kitchen_stove_cooking_v13", StringComparison.OrdinalIgnoreCase))
+        {
+            KitchenStoveLayer.Visibility = Visibility.Collapsed;
+        }
+
+        ApplyFurnitureConfig(ObjectAnimationImage, bounds);
         ObjectAnimationImage.Source = frames[0];
         ObjectAnimationImage.Visibility = Visibility.Visible;
 
@@ -1205,9 +2131,14 @@ public partial class HomeWindow : Window
         {
             GamingDeskLayer.Visibility = Visibility.Visible;
         }
+
+        if (KitchenStoveLayer is not null)
+        {
+            KitchenStoveLayer.Visibility = Visibility.Visible;
+        }
     }
 
-    private void StartEffectLoop(string animationName, double left, double top, double width, double height)
+    private void StartEffectLoop(string animationName, FurnitureConfig bounds)
     {
         StopEffectLoop();
         if (!effectAnimationFrames.TryGetValue(animationName, out var frames) || frames.Count == 0)
@@ -1215,10 +2146,7 @@ public partial class HomeWindow : Window
             return;
         }
 
-        Canvas.SetLeft(EffectAnimationImage, left);
-        Canvas.SetTop(EffectAnimationImage, top);
-        EffectAnimationImage.Width = width;
-        EffectAnimationImage.Height = height;
+        ApplyFurnitureConfig(EffectAnimationImage, bounds);
         EffectAnimationImage.Source = frames[0];
         EffectAnimationImage.Visibility = Visibility.Visible;
 
@@ -1283,15 +2211,47 @@ public partial class HomeWindow : Window
 
     private static string PlacementConfigPath()
     {
-        return Path.Combine(AppContext.BaseDirectory, PlacementConfigRelativePath);
+        return Path.Combine(UserDataDirectory(), "Home", "placements.local.json");
     }
 
     private static string FurnitureConfigPath()
     {
-        return Path.Combine(AppContext.BaseDirectory, FurnitureConfigRelativePath);
+        return Path.Combine(UserDataDirectory(), "Home", "furniture.local.json");
+    }
+
+    private static string LayoutDiagnosticPath()
+    {
+        return Path.Combine(UserDataDirectory(), "Home", "layout-runtime-diagnostics.jsonl");
+    }
+
+    private static string UserDataDirectory()
+    {
+        var configured = Environment.GetEnvironmentVariable("DOCKPET_USER_DATA_DIR");
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            return configured;
+        }
+
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var depth = 0; depth < 10 && directory is not null; depth++, directory = directory.Parent)
+        {
+            if (Directory.Exists(Path.Combine(directory.FullName, "DockPetWin"))
+                && Directory.Exists(Path.Combine(directory.FullName, "Launcher")))
+            {
+                return Path.Combine(directory.FullName, "UserData");
+            }
+        }
+
+        return Path.Combine(AppContext.BaseDirectory, "UserData");
     }
 
     private static Dictionary<string, HomePlacement> LoadPlacementOverrides()
+    {
+        return TryLoadPlacementOverrides()
+            ?? new Dictionary<string, HomePlacement>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static Dictionary<string, HomePlacement>? TryLoadPlacementOverrides()
     {
         EnsurePlacementConfigFile();
         var path = PlacementConfigPath();
@@ -1332,7 +2292,7 @@ public partial class HomeWindow : Window
         }
         catch
         {
-            return new Dictionary<string, HomePlacement>(StringComparer.OrdinalIgnoreCase);
+            return null;
         }
     }
 
@@ -1347,9 +2307,7 @@ public partial class HomeWindow : Window
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(
-                path,
-                JsonSerializer.Serialize(DefaultPlacementConfigs(), PlacementJsonOptions));
+            WriteJsonAtomically(path, DefaultPlacementConfigs());
         }
         catch
         {
@@ -1368,9 +2326,7 @@ public partial class HomeWindow : Window
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(
-                path,
-                JsonSerializer.Serialize(DefaultFurnitureConfigs(), PlacementJsonOptions));
+            WriteJsonAtomically(path, DefaultFurnitureConfigs());
         }
         catch
         {
@@ -1379,6 +2335,11 @@ public partial class HomeWindow : Window
     }
 
     private static Dictionary<string, FurnitureConfig> LoadFurnitureConfigs()
+    {
+        return TryLoadFurnitureConfigs() ?? DefaultFurnitureConfigs();
+    }
+
+    private static Dictionary<string, FurnitureConfig>? TryLoadFurnitureConfigs()
     {
         EnsureFurnitureConfigFile();
         var path = FurnitureConfigPath();
@@ -1412,7 +2373,7 @@ public partial class HomeWindow : Window
         }
         catch
         {
-            return DefaultFurnitureConfigs();
+            return null;
         }
     }
 
@@ -1424,6 +2385,9 @@ public partial class HomeWindow : Window
             ["study_desk"] = new() { Left = 635, Top = 153, Width = 430, Height = 287, ZIndex = 4 },
             ["gaming_desk"] = new() { Left = 1070, Top = 265, Width = 540, Height = 360, ZIndex = 4 },
             ["sofa_table"] = new() { Left = 650, Top = 420, Width = 500, Height = 333, ZIndex = 4 },
+            ["kitchen_stove_idle"] = new() { Left = 32, Top = 235, Width = 205, Height = 249, ZIndex = 4 },
+            ["kitchen_stove_cooking"] = new() { Left = 32, Top = 210, Width = 205, Height = 249, ZIndex = 5 },
+            ["sofa_plush"] = new() { Left = 837, Top = 410, Width = 72, Height = 95, ZIndex = 5 },
             ["tea_table"] = new() { Left = 338, Top = 252, Width = 335, Height = 223, ZIndex = 4 },
             ["tea_smoke"] = new() { Left = 430, Top = 323, Width = 96, Height = 96, ZIndex = 12 }
         };
@@ -1457,6 +2421,7 @@ public partial class HomeWindow : Window
             HomePlacement.ReadSofa,
             HomePlacement.DrinkTea,
             HomePlacement.PlayGame,
+            HomePlacement.CookKitchen,
             HomePlacement.WalkHallLeft,
             HomePlacement.WalkHallRight
         ];
@@ -1471,7 +2436,8 @@ public partial class HomeWindow : Window
             config.Width is > 0 ? config.Width.Value : placement.Width,
             config.Height is > 0 ? config.Height.Value : placement.Height,
             config.ZIndex ?? placement.ZIndex,
-            placement.ConfigKey);
+            placement.ConfigKey,
+            config.Rotation ?? placement.Rotation);
     }
 
     private static Dictionary<string, ImageSource> LoadHomePoses()
@@ -1533,6 +2499,7 @@ public partial class HomeWindow : Window
         AddAnimationFrames(frames, "read_sofa_anchor_slot", "animations", "characters", "read_sofa_idle");
         AddAnimationFrames(frames, "drink_tea_anchor_slot", "animations", "characters", "drink_tea_idle");
         AddAnimationFrames(frames, "play_game_anchor_slot", "animations", "characters", "play_game_idle");
+        AddAnimationFrames(frames, "cook_kitchen_anchor_slot", "animations", "characters", "cook_kitchen_v13");
 
         return frames;
     }
@@ -1591,7 +2558,8 @@ public partial class HomeWindow : Window
             ["study_desk_chair_back_anchor"] = TimeSpan.FromMilliseconds(1000d / 7d),
             ["read_sofa_anchor_slot"] = TimeSpan.FromMilliseconds(1000d / 7d),
             ["drink_tea_anchor_slot"] = TimeSpan.FromMilliseconds(1000d / 7d),
-            ["play_game_anchor_slot"] = TimeSpan.FromMilliseconds(1000d / 8d)
+            ["play_game_anchor_slot"] = TimeSpan.FromMilliseconds(1000d / 8d),
+            ["cook_kitchen_anchor_slot"] = TimeSpan.FromMilliseconds(1000d / 7d)
         };
     }
 
@@ -1602,6 +2570,7 @@ public partial class HomeWindow : Window
         {
             AddAnimationFrames(frames, "gaming_station_tetris_v3", "animations", "objects", "gaming_station_tetris_v3");
             AddAnimationFrames(frames, "study_desk_page_flip", "animations", "objects", "study_desk_page_flip");
+            AddAnimationFrames(frames, "kitchen_stove_cooking_v13", "animations", "objects", "kitchen_stove_cooking_v13");
             return frames;
         }
 
@@ -1618,7 +2587,8 @@ public partial class HomeWindow : Window
         return new Dictionary<string, TimeSpan>(StringComparer.OrdinalIgnoreCase)
         {
             ["gaming_station_tetris_v3"] = TimeSpan.FromMilliseconds(1000d / 7d),
-            ["study_desk_page_flip"] = TimeSpan.FromMilliseconds(1000d / 7d)
+            ["study_desk_page_flip"] = TimeSpan.FromMilliseconds(1000d / 7d),
+            ["kitchen_stove_cooking_v13"] = TimeSpan.FromMilliseconds(650)
         };
     }
 
@@ -1685,7 +2655,8 @@ public partial class HomeWindow : Window
         double Width,
         double Height,
         int ZIndex,
-        string? ConfigKey = null)
+        string? ConfigKey = null,
+        double Rotation = 0)
     {
         public static readonly HomePlacement Idle = new("idle_front", 330, 400, 117, 177, 10, "idle_front");
         public static readonly HomePlacement SitBed = new("sleep_bed_anchor_slot", 315, 642, 249, 187, 10, "sit_bed");
@@ -1694,6 +2665,7 @@ public partial class HomeWindow : Window
         public static readonly HomePlacement ReadSofa = new("read_sofa_anchor_slot", 750, 680, 241, 193, 10, "read_sofa");
         public static readonly HomePlacement DrinkTea = new("drink_tea_anchor_slot", 458, 505, 241, 193, 10, "drink_tea");
         public static readonly HomePlacement PlayGame = new("play_game_anchor_slot", 1250, 603, 241, 193, 10, "play_game");
+        public static readonly HomePlacement CookKitchen = new("cook_kitchen_anchor_slot", 172 + 137 / 2d, 400, 137, 154, 10, "cook_kitchen");
         public static readonly HomePlacement WalkHallLeft = new("walk_left", 690, 760, 155, 174, 10, "walk_hall_left");
         public static readonly HomePlacement WalkHallRight = new("walk_right", 1240, 825, 114, 174, 10, "walk_hall_right");
     }
@@ -1705,6 +2677,7 @@ public partial class HomeWindow : Window
         public double? Width { get; set; }
         public double? Height { get; set; }
         public int? ZIndex { get; set; }
+        public double? Rotation { get; set; }
 
         public static PlacementConfig From(HomePlacement placement)
         {
@@ -1714,7 +2687,8 @@ public partial class HomeWindow : Window
                 BottomY = placement.BottomY,
                 Width = placement.Width,
                 Height = placement.Height,
-                ZIndex = placement.ZIndex
+                ZIndex = placement.ZIndex,
+                Rotation = placement.Rotation
             };
         }
     }
@@ -1726,6 +2700,7 @@ public partial class HomeWindow : Window
         public double? Width { get; set; }
         public double? Height { get; set; }
         public int? ZIndex { get; set; }
+        public double? Rotation { get; set; }
 
         public static FurnitureConfig Merge(FurnitureConfig fallback, FurnitureConfig config)
         {
@@ -1735,8 +2710,15 @@ public partial class HomeWindow : Window
                 Top = config.Top ?? fallback.Top,
                 Width = config.Width is > 0 ? config.Width : fallback.Width,
                 Height = config.Height is > 0 ? config.Height : fallback.Height,
-                ZIndex = config.ZIndex ?? fallback.ZIndex
+                ZIndex = config.ZIndex ?? fallback.ZIndex,
+                Rotation = config.Rotation ?? fallback.Rotation
             };
         }
     }
+
+    private sealed record DebugTarget(
+        string Key,
+        string Label,
+        FrameworkElement Element,
+        bool IsPlacement);
 }

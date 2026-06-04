@@ -33,6 +33,9 @@ dotnet publish $project `
     -p:DebugType=None `
     -p:DebugSymbols=false `
     -o $publishDir
+if ($LASTEXITCODE -ne 0) {
+    throw "dotnet publish failed with exit code $LASTEXITCODE"
+}
 
 $releaseDocs = @(
     "README.md",

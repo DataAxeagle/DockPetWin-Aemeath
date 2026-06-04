@@ -1,9 +1,11 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using DockPetWin.Core.Agents;
+using WpfButton = System.Windows.Controls.Button;
+using WpfBrushes = System.Windows.Media.Brushes;
 using WpfColor = System.Windows.Media.Color;
 using WpfHorizontalAlignment = System.Windows.HorizontalAlignment;
 
@@ -12,13 +14,18 @@ namespace DockPetWin;
 public partial class AgentChatWindow : Window
 {
     private static readonly Random StatusRandom = new();
-    private readonly AgentStore store = new();
+    private readonly Dictionary<AgentConversationMode, AgentStore> stores = new()
+    {
+        [AgentConversationMode.Immersive] = new AgentStore(AgentConversationMode.Immersive),
+        [AgentConversationMode.Daily] = new AgentStore(AgentConversationMode.Daily)
+    };
     private readonly AgentChatClient client = new();
     private readonly Action<string>? showPetBubble;
     private readonly Func<string, bool>? beforeUserMessage;
     private readonly Action<string, string>? afterAssistantReply;
     private readonly Func<string?>? extraSystemContextProvider;
     private CancellationTokenSource? activeRequest;
+    private AgentConversationMode currentMode = AgentConversationMode.Immersive;
     private string assistantDisplayName = "爱弥斯";
 
     public AgentChatWindow(
@@ -38,16 +45,23 @@ public partial class AgentChatWindow : Window
         Closed += (_, _) => activeRequest?.Cancel();
     }
 
+    private AgentStore Store => stores[currentMode];
+
+    private bool IsImmersiveMode => currentMode == AgentConversationMode.Immersive;
+
+    private string ModeLabel => IsImmersiveMode ? "沉浸对话" : "日常对话";
+
     private void LoadConversation()
     {
         ConversationPanel.Children.Clear();
-        var settings = store.LoadSettings();
+        var settings = Store.LoadSettings();
         assistantDisplayName = string.IsNullOrWhiteSpace(settings.PetName) ? "爱弥斯" : settings.PetName.Trim();
-        Title = $"{assistantDisplayName}对话";
+        Title = $"{assistantDisplayName} · {ModeLabel}";
         TitleText.Text = $"{assistantDisplayName}对话";
-        StatusText.Text = $"已加载 {assistantDisplayName} Agent";
+        StatusText.Text = $"已加载 {ModeLabel}";
+        UpdateModeTabs();
 
-        foreach (var message in store.LoadRecentHistory(settings.MaxHistoryMessages * 2))
+        foreach (var message in Store.LoadRecentHistory(settings.MaxHistoryMessages * 2))
         {
             ShowExchangeBubble(
                 message.Role == "user" ? "你" : assistantDisplayName,
@@ -66,14 +80,14 @@ public partial class AgentChatWindow : Window
             return;
         }
 
-        var isFirstConversationMessage = store.LoadRecentHistory(1).Count == 0;
+        var isFirstConversationMessage = Store.LoadRecentHistory(1).Count == 0;
         InputBox.Clear();
-        store.AppendHistory("user", text);
+        Store.AppendHistory("user", text);
         ShowExchangeBubble("你", text, alignRight: true);
-        if (beforeUserMessage?.Invoke(text) == true)
+        if (IsImmersiveMode && beforeUserMessage?.Invoke(text) == true)
         {
             var localReply = $"{assistantDisplayName}点点头，继续忙自己的事。";
-            store.AppendHistory("assistant", localReply);
+            Store.AppendHistory("assistant", localReply);
             ShowExchangeBubble(assistantDisplayName, localReply, alignRight: false);
             showPetBubble?.Invoke(localReply);
             StatusText.Text = "继续小屋生活";
@@ -87,25 +101,25 @@ public partial class AgentChatWindow : Window
 
         try
         {
-            var settings = store.LoadSettings();
-            var profile = store.BuildSystemPrompt(settings);
-            var extraSystemContext = extraSystemContextProvider?.Invoke();
+            var settings = Store.LoadSettings();
+            var profile = Store.BuildSystemPrompt(settings);
+            var extraSystemContext = IsImmersiveMode ? extraSystemContextProvider?.Invoke() : null;
             if (!string.IsNullOrWhiteSpace(extraSystemContext))
             {
                 profile += $"{Environment.NewLine}{Environment.NewLine}{extraSystemContext.Trim()}";
             }
-            if (isFirstConversationMessage)
+            if (IsImmersiveMode && isFirstConversationMessage)
             {
                 profile += $"{Environment.NewLine}{Environment.NewLine}{FirstConversationContext()}";
             }
 
-            var history = store.LoadRecentHistory(settings.MaxHistoryMessages * 2);
+            var history = Store.LoadRecentHistory(settings.MaxHistoryMessages * 2);
             var reply = await client.SendWithToolsAsync(
                 settings,
                 profile,
                 history,
                 text,
-                store,
+                Store,
                 activeRequest.Token,
                 trace => Dispatcher.Invoke(() =>
                 {
@@ -119,10 +133,13 @@ public partial class AgentChatWindow : Window
 
                     ShowToolTrace(trace);
                 }));
-            store.AppendHistory("assistant", reply);
+            Store.AppendHistory("assistant", reply);
             ShowExchangeBubble(assistantDisplayName, reply, alignRight: false);
-            showPetBubble?.Invoke(reply);
-            afterAssistantReply?.Invoke(text, reply);
+            if (IsImmersiveMode)
+            {
+                showPetBubble?.Invoke(reply);
+                afterAssistantReply?.Invoke(text, reply);
+            }
             var autoSavedPreference = await TryAutoSaveLongTermPreferenceAsync(settings, text, reply, activeRequest.Token);
             await TryCompressHistoryIfNeeded(settings, activeRequest.Token);
             StatusText.Text = autoSavedPreference ? "已回复；记下了一点偏好" : "已回复";
@@ -130,7 +147,7 @@ public partial class AgentChatWindow : Window
         catch (Exception ex)
         {
             var error = $"[错误] {ex.Message}";
-            store.AppendHistory("assistant", error);
+            Store.AppendHistory("assistant", error);
             ShowExchangeBubble(assistantDisplayName, error, alignRight: false);
             StatusText.Text = "调用失败，请检查 API key / 网络 / 模型配置";
         }
@@ -164,6 +181,53 @@ public partial class AgentChatWindow : Window
         }
     }
 
+    private void ImmersiveTab_Click(object sender, RoutedEventArgs e)
+    {
+        SwitchMode(AgentConversationMode.Immersive);
+    }
+
+    private void DailyTab_Click(object sender, RoutedEventArgs e)
+    {
+        SwitchMode(AgentConversationMode.Daily);
+    }
+
+    private void SwitchMode(AgentConversationMode mode)
+    {
+        if (activeRequest is not null)
+        {
+            StatusText.Text = "等这句话说完后再切换对话模式。";
+            return;
+        }
+
+        if (currentMode == mode)
+        {
+            return;
+        }
+
+        currentMode = mode;
+        LoadConversation();
+    }
+
+    private void UpdateModeTabs()
+    {
+        ApplyModeTabStyle(ImmersiveTabButton, IsImmersiveMode);
+        ApplyModeTabStyle(DailyTabButton, !IsImmersiveMode);
+    }
+
+    private static void ApplyModeTabStyle(WpfButton button, bool selected)
+    {
+        button.Background = selected
+            ? new SolidColorBrush(WpfColor.FromRgb(240, 107, 156))
+            : new SolidColorBrush(WpfColor.FromRgb(255, 242, 248));
+        button.Foreground = selected
+            ? WpfBrushes.White
+            : new SolidColorBrush(WpfColor.FromRgb(48, 42, 54));
+        button.BorderBrush = selected
+            ? new SolidColorBrush(WpfColor.FromRgb(240, 107, 156))
+            : new SolidColorBrush(WpfColor.FromRgb(232, 185, 207));
+        button.FontWeight = selected ? FontWeights.SemiBold : FontWeights.Normal;
+    }
+
     private void ClearConversation_Click(object sender, RoutedEventArgs e)
     {
         var result = System.Windows.MessageBox.Show(
@@ -177,7 +241,7 @@ public partial class AgentChatWindow : Window
             return;
         }
 
-        var message = store.ResetActiveConversationContext();
+        var message = Store.ResetActiveConversationContext();
         ConversationPanel.Children.Clear();
         StatusText.Text = message;
         ShowExchangeBubble(assistantDisplayName, "嗯，我把这次频率重新归零了。旧记录还在本地，需要时你再叫我去翻。", alignRight: false);
@@ -361,8 +425,8 @@ public partial class AgentChatWindow : Window
         {
             var candidate = await client.ExtractAutoLongTermMemoryAsync(
                 settings,
-                store.ReadMemorySummary(longTerm: true, maxChars: 8000),
-                store.LoadRecentHistory(settings.MaxHistoryMessages * 2),
+                Store.ReadMemorySummary(longTerm: true, maxChars: 8000),
+                Store.LoadRecentHistory(settings.MaxHistoryMessages * 2),
                 userMessage,
                 assistantReply,
                 cancellationToken);
@@ -374,7 +438,7 @@ public partial class AgentChatWindow : Window
                 return false;
             }
 
-            store.SaveMemoryCandidate(candidate, longTerm: true);
+            Store.SaveMemoryCandidate(candidate, longTerm: true);
             return true;
         }
         catch
@@ -442,7 +506,7 @@ public partial class AgentChatWindow : Window
 
     private async Task TryCompressHistoryIfNeeded(AgentChatSettings settings, CancellationToken cancellationToken)
     {
-        var sessionUserMessages = store.CountSessionUserMessages();
+        var sessionUserMessages = Store.CountSessionUserMessages();
         if (sessionUserMessages <= 0 || sessionUserMessages % 30 != 0)
         {
             return;
@@ -453,10 +517,10 @@ public partial class AgentChatWindow : Window
             StatusText.Text = "正在压缩最近对话记忆...";
             var summary = await client.SummarizeAsync(
                 settings,
-                store.LoadRollingSummary(),
-                store.LoadAllHistory().TakeLast(60).ToList(),
+                Store.LoadRollingSummary(),
+                Store.LoadAllHistory().TakeLast(60).ToList(),
                 cancellationToken);
-            store.SaveRollingSummary(summary);
+            Store.SaveRollingSummary(summary);
         }
         catch
         {
@@ -468,8 +532,9 @@ public partial class AgentChatWindow : Window
     {
         Process.Start(new ProcessStartInfo
         {
-            FileName = store.RootDirectory,
+            FileName = Store.RootDirectory,
             UseShellExecute = true
         });
     }
 }
+

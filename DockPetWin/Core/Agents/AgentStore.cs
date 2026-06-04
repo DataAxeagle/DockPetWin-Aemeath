@@ -20,10 +20,9 @@ public sealed class AgentStore
         WriteIndented = false
     };
 
-    private static bool sessionInitialized;
-    private static int sessionStartUserMessages;
-    private static readonly DateTime SessionStartedAt = DateTime.Now;
-
+    private bool sessionInitialized;
+    private int sessionStartUserMessages;
+    private readonly AgentConversationMode mode;
     private readonly string rootDirectory;
     private readonly string profilePath;
     private readonly string characterDirectory;
@@ -42,28 +41,33 @@ public sealed class AgentStore
     private readonly string toolOutputsDirectory;
     private readonly string tasksDirectory;
 
-    public AgentStore()
+    public AgentStore(AgentConversationMode mode = AgentConversationMode.Immersive)
     {
+        this.mode = mode;
         rootDirectory = Path.Combine(AppContext.BaseDirectory, "UserData", "Agents");
         profilePath = Path.Combine(rootDirectory, "default-agent.md");
         characterDirectory = Path.Combine(rootDirectory, "character");
         identityPath = Path.Combine(characterDirectory, "00_identity.md");
-        historyPath = Path.Combine(rootDirectory, "conversation.jsonl");
         settingsPath = Path.Combine(rootDirectory, "settings.local.json");
-        conversationsDirectory = Path.Combine(rootDirectory, "conversations");
         knowledgeDirectory = Path.Combine(rootDirectory, "knowledge");
-        memoryDirectory = Path.Combine(rootDirectory, "memory");
         workspaceDirectory = Path.Combine(rootDirectory, "workspace");
         skillDirectory = Path.Combine(workspaceDirectory, "skills");
+        var modeRoot = mode == AgentConversationMode.Immersive
+            ? rootDirectory
+            : Path.Combine(rootDirectory, "daily");
+        historyPath = Path.Combine(modeRoot, "conversation.jsonl");
+        conversationsDirectory = Path.Combine(modeRoot, "conversations");
+        memoryDirectory = Path.Combine(modeRoot, "memory");
         summariesDirectory = Path.Combine(memoryDirectory, "summaries");
         archivedSummariesDirectory = Path.Combine(summariesDirectory, "compressed");
         activeSessionSummaryPath = Path.Combine(summariesDirectory, "current-session-summary.md");
         previousContextBridgePath = Path.Combine(summariesDirectory, "previous-context-bridge.md");
-        toolOutputsDirectory = Path.Combine(rootDirectory, "tool_outputs");
-        tasksDirectory = Path.Combine(rootDirectory, "tasks");
+        toolOutputsDirectory = Path.Combine(modeRoot, "tool_outputs");
+        tasksDirectory = Path.Combine(modeRoot, "tasks");
         EnsureDefaults();
     }
 
+    public AgentConversationMode Mode => mode;
     public string RootDirectory => rootDirectory;
     public string ProfilePath => profilePath;
     public string CharacterDirectory => characterDirectory;
@@ -124,6 +128,39 @@ public sealed class AgentStore
         }
 
         return File.ReadAllText(currentStatePath).Trim();
+    }
+
+    private static string FilterDailyModeBackground(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return "";
+        }
+
+        var blockedPhrases = new[]
+        {
+            "默认模拟背景",
+            "用户第一次聊天默认模拟为",
+            "当前对话默认发生",
+            "又一次回来见到彼此",
+            "又一次见到彼此",
+            "等到巡巡回来",
+            "过了很久，巡巡再次回到拉海洛",
+            "再次回到拉海洛",
+            "重回拉海洛",
+            "重新见到快毕业的爱弥斯",
+            "熟人久别重逢后继续生活",
+            "你回来了"
+        };
+
+        var lines = text
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n')
+            .Where(line => !blockedPhrases.Any(phrase =>
+                line.Contains(phrase, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        return string.Join(Environment.NewLine, lines).Trim();
     }
 
     public AgentChatSettings LoadSettings()
@@ -350,18 +387,34 @@ public sealed class AgentStore
 
     public string BuildSystemPrompt(AgentChatSettings settings)
     {
+        var profile = LoadProfile();
+        if (mode == AgentConversationMode.Daily)
+        {
+            profile = FilterDailyModeBackground(profile);
+        }
+
         var parts = new List<string>
         {
-            LoadProfile()
+            profile
         };
 
         var characterPack = LoadCharacterPack();
+        if (mode == AgentConversationMode.Daily)
+        {
+            characterPack = FilterDailyModeBackground(characterPack);
+        }
+
         if (!string.IsNullOrWhiteSpace(characterPack))
         {
             parts.Add("# 角色还原包\n\n" + characterPack.Trim());
         }
 
         var knowledgeIndex = LoadKnowledgeIndex();
+        if (mode == AgentConversationMode.Daily)
+        {
+            knowledgeIndex = FilterDailyModeBackground(knowledgeIndex);
+        }
+
         if (!string.IsNullOrWhiteSpace(knowledgeIndex))
         {
             parts.Add("# Knowledge 资料索引（只作路由，不等于完整资料）\n\n" + knowledgeIndex.Trim());
@@ -387,7 +440,14 @@ public sealed class AgentStore
             identityLines.Add("- 对用户的称呼尚未设置：默认称呼“漂泊者”。用户告诉你希望被怎么称呼后，引导用户在设置里保存。");
         }
         identityLines.Add("- 固定关系：当前用户就是漂泊者。无论用户之后把日常称呼改成什么，都不要把用户当陌生玩家或第三方旁观者。");
-        identityLines.Add("- 默认关系视角：你和漂泊者是在拉海洛重新相见的关系；提到爱弥斯相关经历时，用“你当时”“后来我们”“你回来了”这类共同经历视角。");
+        if (mode == AgentConversationMode.Immersive)
+        {
+            identityLines.Add("- 默认关系视角：你和漂泊者是在拉海洛重新相见的关系；提到爱弥斯相关经历时，用“你当时”“后来我们”“你回来了”这类共同经历视角。");
+        }
+        else
+        {
+            identityLines.Add("- 日常对话边界：当前窗口是日常对话，不要主动套用“漂泊者重回拉海洛、再次见到爱弥斯、首次重逢开场”这段沉浸背景；只有用户主动聊到这段剧情或要求沉浸扮演时才引用。");
+        }
 
         if (identityLines.Count > 0)
         {
@@ -431,9 +491,20 @@ public sealed class AgentStore
         }
 
         var currentStateAnchor = LoadCurrentStateAnchor();
+        if (mode == AgentConversationMode.Daily)
+        {
+            currentStateAnchor = FilterDailyModeBackground(currentStateAnchor);
+        }
+
         if (!string.IsNullOrWhiteSpace(currentStateAnchor))
         {
             parts.Add("# 当前状态硬锚点（覆盖旧摘要中的客观设定）\n\n" + currentStateAnchor.Trim());
+        }
+
+        var workspaceHarness = LoadWorkspaceHarnessSummary();
+        if (!string.IsNullOrWhiteSpace(workspaceHarness))
+        {
+            parts.Add("# Workspace Harness（每次在 workspace 干活必须遵循）\n\n" + workspaceHarness.Trim());
         }
 
         parts.Add("""
@@ -447,6 +518,16 @@ public sealed class AgentStore
         if (settings.EnableTools)
         {
             parts.Add($$"""
+            # Startup Permission Hook（强制权限边界）
+
+            这段 hook 每次启动都会注入，并且工具层也会硬性执行：
+            - 允许写入：`{{workspaceDirectory}}/**`。
+            - 允许写入：`{{profilePath}}`，用于用户明确要求你调整 default-agent 时。
+            - 禁止写入：除 `default-agent.md` 之外的 `UserData/Agents` 根目录文件、`character/`、`knowledge/`、`memory/`、`tasks/`、`tool_outputs/`、`daily/` 等非 workspace 区域。
+            - 禁止删除：你没有文件删除工具；提醒删除也已从对话工具中禁用。需要清理时，只能创建整理索引、归档清单或新的分类副本，不能删除原文件。
+            - 工作区规则：凡是在 `workspace/` 中产出或整理文件，先遵循 `workspace/PROJECT.md` 和 `workspace/rules/README.md`；普通输出放到 `workspace/output/分类/YYYY-MM-DD/`，重要变更写入 `workspace/changes/YYYY-MM-DD/任务名/summary.md`。
+            - Python 规则：只能在 `workspace/` 内运行，文件读写被限制到 `workspace/`，禁止删除、子进程和网络访问；需要 Excel/Word/CSV 时优先导入 `scripts/aemeath_tools.py`。
+
             # Agent 工具能力
 
             你可以请求运行环境执行受限工具。工具调用完全由你作为 agent 决策：当前用户不会直接看到工具过程，程序也不会绕过你强制调用工具。只有确实需要读取 skill、读取/写入受限工作区文件、读取记忆或记录任务状态时才使用工具。
@@ -465,12 +546,15 @@ public sealed class AgentStore
             可用工具：
             - `tool_specs`：查看可用工具、参数要求和权限。
             - `list_skills`：按关键词搜索本机已安装 skill。
-            - `read_skill`：读取并激活 workspace 内指定 skill 的 SKILL.md。
+            - `read_skill` / `load_skill`：读取并激活 workspace 内指定 skill 的 SKILL.md。
+            - `list_skill_files`：列出当前已激活 skill 目录内的文件。
+            - `find_skill_files`：在当前已激活 skill 目录内查找文件。
+            - `read_skill_file`：读取当前已激活 skill 目录内的资料，并记录为已读。
             - `list_memories`：列出长期/短期记忆文件路径。
             - `read_memory`：读取长期/短期记忆摘要。
             - `save_memory`：保存你提炼后的长期/短期记忆。
-            - `search_knowledge`：按关键词搜索 knowledge/ 资料库，不会每次全量加载大设定。
-            - `read_knowledge`：读取 knowledge/ 中的指定资料文件。
+            - `search_knowledge`：按关键词搜索爱弥斯人设/世界观专用的桌宠 knowledge/ 资料库，不会每次全量加载大设定；不要用它读取 skill 自己的 knowledge/。
+            - `read_knowledge`：读取爱弥斯人设/世界观专用 knowledge/ 中的指定资料文件；不要用它读取 skill 自己的 knowledge/。
             - `list_task_runs`：列出最近定时任务运行记录和输出路径。
             - `read_task_run`：读取某次定时任务运行记录。
             - `list_files`：列出 Agents 数据目录文件。
@@ -478,21 +562,26 @@ public sealed class AgentStore
             - `read_file`：读取 Agents 数据目录内的文本文件。
             - `handle_read`：读取大型工具输出 handle 的片段。
             - `write_file`：写入 Agents 数据目录内的文本文件。
+            - `python_execute`：在 workspace 内执行受限 Python，用于简单数据处理、生成/修改 CSV、Excel、Word 等文件。
             - `create_task`：记录一个轻量任务状态，用于后续提醒和追踪；不会真正执行后台命令。
 
             写文件规则：
             - 用户要求在“你的工作区”“workspace”“工作目录”“Agents目录”创建文件时，可以直接使用 `write_file`。
             - 如果用户没有指定文件名，自己取一个简短中文文件名。
-            - 如果用户没有指定目录，默认写到 `workspace/output/`。
+            - 如果用户没有指定目录，默认写到 `workspace/output/notes/YYYY-MM-DD/`。
+            - 输出要主动分类：报告放 `workspace/output/reports/YYYY-MM-DD/`，SQL 放 `workspace/output/sql-output/YYYY-MM-DD/`，表格放 `workspace/output/spreadsheets/YYYY-MM-DD/`，Word 放 `workspace/output/documents/YYYY-MM-DD/`，临时笔记放 `workspace/output/notes/YYYY-MM-DD/`。
             - `write_file` 的 `path` 优先使用相对路径，例如 `workspace/output/爱弥斯介绍.md`。
             - 允许创建 `.md`、`.txt`、`.csv`、`.json` 这类文本文件。
-            - 不要因为“只能在 Agents 数据目录内写入”而说没有权限；这正是允许写入的目录。
+            - 只有 `workspace/**` 和 `default-agent.md` 可写；不要因为这个受限边界而说没有权限，这正是允许写入的目录。
 
             安全边界：
-            - 可读写根目录固定为 `{{rootDirectory}}`。
+            - 可读根目录固定为 `{{rootDirectory}}`。
+            - 可写根目录固定为 `{{workspaceDirectory}}`，另允许用户明确要求时写入 `{{profilePath}}`。
             - 默认普通输出目录为 `{{workspaceDirectory}}`。
             - 知识库根目录固定为 `{{knowledgeDirectory}}`，用于游戏设定、角色资料、剧情摘要、台词风格提炼等长期资料。
             - `knowledge/` 是只读资料区：你可以用 `search_knowledge` / `read_knowledge` 读取，但不能用 `write_file` 修改世界观、人设、剧情或台词资料。
+            - 当已经激活某个 skill 时，SKILL.md 里提到的 `knowledge/`、`references/`、`rules/`、`assets/`、`templates/` 等相对路径，默认都先解析为该 skill 目录下的路径，例如 `workspace/skills/skill-name/knowledge/`，不要误认为是爱弥斯人设知识库 `{{knowledgeDirectory}}`。
+            - 读取 skill 自带资料时，优先使用 `list_skill_files`、`find_skill_files`、`read_skill_file`；只有当 SKILL.md 明确要求读取桌宠人设/世界观 knowledge 时，才使用 `search_knowledge` 或 `read_knowledge`。
             - 记忆根目录固定为 `{{memoryDirectory}}`。
             - 长期记忆摘要保存在 `memory/permanent/**/摘要.md`，每次启动会自动加载全部长期记忆摘要。
             - `save_memory` 默认把长期用户记忆写入 `memory/permanent/用户记忆/通用/摘要.md` 和 `原文.md`；流程坑、人设记忆、设置摘要等分类记忆应按索引读取。
@@ -504,13 +593,21 @@ public sealed class AgentStore
             - `create_task` 只记录任务，不代表已经完成真实操作。
             - `settings.local.json` 可能包含 API key，不能用文件工具读取或写入；需要配置时让用户打开设置窗口。
             - 不要请求读取 API key、密码、token 或系统敏感文件。
+            - 不要尝试删除文件、目录、提醒或记录；如果用户要求整理旧文件，用新索引、新清单、新分类副本完成。
             - 不要声称工具已经执行，除非你收到了工具结果。
             - 禁止把“正在读取/正在搜索/正在调用/稍等”当作最终回复。需要工具就必须发出 tool_call；不需要工具就直接给自然语言答案。
 
             Skill 调用流程：
-            - 用户说“调用/使用/执行某个 skill”时，先用 `list_skills` 搜索。
-            - 确认名称后用 `read_skill` 读取 SKILL.md。
+            - runtime 可能会在你回答前自动识别并预加载 skill；如果上下文里出现 `Skill Runtime State`，表示当前请求已经进入 active skill。
+            - 用户说“调用/使用/执行某个 skill”但 runtime 未自动激活时，先用 `list_skills` 搜索。
+            - 确认名称后用 `read_skill` 或 `load_skill` 读取 SKILL.md。
             - 收到 `read_skill` 的 `ok=true` 结果后，按 SKILL.md 的流程继续；如果只是说明性 skill，就用自然语言执行；如果需要写文件，只能继续使用允许的文件工具。
+            - 一旦 `read_skill` 成功读取某个 SKILL.md，后续执行必须以该 SKILL.md 为最高优先级：严格按步骤、检查清单、输入输出要求和禁止事项执行，不允许只参考部分内容、跳过流程或用普通聊天习惯替代 skill 流程。
+            - 如果 SKILL.md 的要求与默认输出习惯、你的自行推断或普通对话风格冲突，以 SKILL.md 为准；如果信息不足以继续执行，先向用户补问关键缺口，不要自行假设后跳步。
+            - 如果因为权限、缺少文件、缺少工具或用户信息不足导致无法完整执行 SKILL.md，必须明确说明卡在哪一步，并给出需要用户补充的具体内容。
+            - 激活 skill 后，所有相对资料路径优先以 `read_skill` 返回的 skill_root 为根目录；比如 SQL skill 写 `knowledge/`，就是 SQL skill 自己的 `workspace/skills/sql-assistant/knowledge/`，不是爱弥斯的人设 `knowledge/`。
+            - 如果 `Skill Runtime State` 或 `read_skill` 结果列出 Required Skill Files，最终答复前必须用 `read_skill_file` 读取；如果文件不存在或不适用，要说明原因。
+            - 如果 skill 本地资料和爱弥斯人设资料都存在同名目录或文件，执行 skill 时优先读取 skill 本地资料；除非用户或 SKILL.md 明确要求查询爱弥斯人设/剧情，才回到桌宠 knowledge。
             - 不要说“我没有 skill 能力”；你至少有 `list_skills` 和 `read_skill`。
 
             文件读取流程：
@@ -626,6 +723,37 @@ public sealed class AgentStore
                 .TakeLast(Math.Max(0, count))
                 .Reverse()
                 .Select(entry => $"- {entry.StartedAt:MM-dd HH:mm} {entry.Activity}；内容：{entry.Details}；心情：{entry.Mood}；持续：{FormatHomeDuration(entry.DurationSeconds)}"));
+    }
+
+    private string LoadWorkspaceHarnessSummary(int maxChars = 12000)
+    {
+        var files = new[]
+        {
+            Path.Combine(workspaceDirectory, "PROJECT.md"),
+            Path.Combine(workspaceDirectory, "rules", "README.md"),
+            Path.Combine(workspaceDirectory, "rules", "runtime-permissions.md")
+        };
+
+        var blocks = files
+            .Where(File.Exists)
+            .Select(file =>
+            {
+                var relative = Path.GetRelativePath(rootDirectory, file).Replace('\\', '/');
+                var text = File.ReadAllText(file).Trim();
+                return $"## {relative}{Environment.NewLine}{text}";
+            })
+            .Where(block => !string.IsNullOrWhiteSpace(block))
+            .ToList();
+
+        if (blocks.Count == 0)
+        {
+            return "";
+        }
+
+        var result = string.Join(Environment.NewLine + Environment.NewLine, blocks);
+        return result.Length <= maxChars
+            ? result
+            : result[..maxChars] + $"{Environment.NewLine}{Environment.NewLine}[Workspace harness 较长，已截断]";
     }
 
     private string LoadRecentSummaryFiles(string directory, int count, int maxChars = 6000)
@@ -1126,6 +1254,16 @@ public sealed class AgentStore
             - 涉及隐私、账号、API key、密码时，提醒用户谨慎处理。
             """);
         }
+        AppendIfMissing(profilePath, "## Workspace / default-agent 自维护授权", """
+
+        ## Workspace / default-agent 自维护授权
+
+        - 当巡巡明确要求你调整自己的启动规则、默认行为、工具使用习惯或 workspace 规则时，你可以使用 `write_file` 修改 `default-agent.md` 或 `workspace/**`。
+        - 修改前先读取目标文件，保留原有人设和关系规则，只追加或局部改动与请求相关的内容。
+        - 任何 workspace 输出都遵循 `workspace/PROJECT.md` 和 `workspace/rules/README.md`。
+        - 普通输出按 `workspace/output/分类/YYYY-MM-DD/` 保存；重要规则、skill、工具、工作流改动写入 `workspace/changes/YYYY-MM-DD/任务名/summary.md`。
+        - 不能删除旧文件；需要整理时创建索引、清单或分类副本。
+        """);
 
         var characterTemplatePath = Path.Combine(characterDirectory, "_template.md");
         if (!File.Exists(characterTemplatePath))
@@ -1469,6 +1607,11 @@ public sealed class AgentStore
         Directory.CreateDirectory(Path.Combine(workspaceDirectory, "changes"));
         Directory.CreateDirectory(Path.Combine(workspaceDirectory, "output"));
         Directory.CreateDirectory(Path.Combine(workspaceDirectory, "scripts"));
+        Directory.CreateDirectory(Path.Combine(workspaceDirectory, "output", "notes"));
+        Directory.CreateDirectory(Path.Combine(workspaceDirectory, "output", "reports"));
+        Directory.CreateDirectory(Path.Combine(workspaceDirectory, "output", "sql-output"));
+        Directory.CreateDirectory(Path.Combine(workspaceDirectory, "output", "spreadsheets"));
+        Directory.CreateDirectory(Path.Combine(workspaceDirectory, "output", "documents"));
 
         var projectPath = Path.Combine(workspaceDirectory, "PROJECT.md");
         if (!File.Exists(projectPath))
@@ -1483,18 +1626,50 @@ public sealed class AgentStore
             - `skills/`：桌宠可读取的本地 skill。桌宠不会扫描全局 skill。
             - `rules/`：桌宠自己的轻量规则。
             - `changes/`：桌宠 agent 产生的重要变更记录。
-            - `output/`：桌宠 agent 生成的普通输出。
-            - `scripts/`：保留给后续安全脚本。
+            - `output/`：桌宠 agent 生成的普通输出，按 `分类/YYYY-MM-DD/` 管理。
+            - `scripts/`：受限 Python 辅助脚本和后续安全脚本。
             - `../tool_outputs/`：大型工具输出落盘区，通过 handle 分段读取。
             - `../tasks/`：轻量任务状态记录。
 
+            ## 输出分类
+
+            - `output/notes/YYYY-MM-DD/`：临时笔记、普通 Markdown。
+            - `output/reports/YYYY-MM-DD/`：报告、说明文档、整理结果。
+            - `output/sql-output/YYYY-MM-DD/`：SQL 文件。
+            - `output/spreadsheets/YYYY-MM-DD/`：CSV、XLSX 等表格。
+            - `output/documents/YYYY-MM-DD/`：DOCX、文档草稿。
+            - `changes/YYYY-MM-DD/任务名/summary.md`：重要变更记录。
+
             ## 安全边界
 
-            - 文件工具只读写 `UserData/Agents` 数据目录。
+            - 文件工具可读 `UserData/Agents` 数据目录。
+            - 文件工具只允许写入 `workspace/**` 和 `../default-agent.md`。
+            - 禁止删除文件、目录、提醒和记录；整理旧文件时创建索引、清单或分类副本。
+            - Python 工具只能在 workspace 内运行，文件读写也限制在 workspace 内。
             - 默认不读取 API key、密码、token。
             - 默认不操作 `my code` 主工作区文件，除非后续显式扩展白名单。
             """);
         }
+        AppendIfMissing(projectPath, "## 输出分类", """
+
+        ## 输出分类
+
+        - `output/notes/YYYY-MM-DD/`：临时笔记、普通 Markdown。
+        - `output/reports/YYYY-MM-DD/`：报告、说明文档、整理结果。
+        - `output/sql-output/YYYY-MM-DD/`：SQL 文件。
+        - `output/spreadsheets/YYYY-MM-DD/`：CSV、XLSX 等表格。
+        - `output/documents/YYYY-MM-DD/`：DOCX、文档草稿。
+        - `changes/YYYY-MM-DD/任务名/summary.md`：重要变更记录。
+        """);
+        AppendIfMissing(projectPath, "## Runtime 权限边界", """
+
+        ## Runtime 权限边界
+
+        - 文件工具可读 `UserData/Agents` 数据目录。
+        - 文件工具只允许写入 `workspace/**` 和 `../default-agent.md`。
+        - 禁止删除文件、目录、提醒和记录；整理旧文件时创建索引、清单或分类副本。
+        - Python 工具只能在 workspace 内运行，文件读写也限制在 workspace 内。
+        """);
 
         var rulesPath = Path.Combine(workspaceDirectory, "rules", "README.md");
         if (!File.Exists(rulesPath))
@@ -1504,11 +1679,229 @@ public sealed class AgentStore
 
             - 先查 `skills/`，再回答需要流程支持的问题。
             - 能用文本解释解决的，不创建文件。
-            - 创建文件默认放到 `output/` 或用户指定的 workspace 相对路径。
+            - 创建文件默认放到 `output/分类/YYYY-MM-DD/` 或用户指定的 workspace 相对路径。
+            - 输出分类：笔记 `output/notes/`，报告 `output/reports/`，SQL `output/sql-output/`，表格 `output/spreadsheets/`，Word 文档 `output/documents/`。
             - 重要变更记录到 `changes/YYYY-MM-DD/任务名/summary.md`。
             - 不处理密钥、账号、token 的读取或保存请求。
+            - 不删除文件或目录；整理时创建索引、清单或分类副本。
+            - 只有 `workspace/**` 和 `../default-agent.md` 可写。
             """);
         }
+        AppendIfMissing(rulesPath, "## 输出分类", """
+
+        ## 输出分类
+
+        - 笔记：`output/notes/YYYY-MM-DD/`
+        - 报告：`output/reports/YYYY-MM-DD/`
+        - SQL：`output/sql-output/YYYY-MM-DD/`
+        - 表格：`output/spreadsheets/YYYY-MM-DD/`
+        - Word：`output/documents/YYYY-MM-DD/`
+        - 重要变更：`changes/YYYY-MM-DD/任务名/summary.md`
+        """);
+        AppendIfMissing(rulesPath, "## 权限", """
+
+        ## 权限
+
+        - 只有 `workspace/**` 和 `../default-agent.md` 可写。
+        - 不删除文件、目录、提醒或任务记录。
+        - Python 只能操作 workspace 内文件。
+        """);
+
+        var permissionPath = Path.Combine(workspaceDirectory, "rules", "runtime-permissions.md");
+        File.WriteAllText(permissionPath, """
+        # Runtime Permissions Hook
+
+        这份规则由桌宠启动时自动刷新，用于约束爱弥斯的工具权限。
+
+        ## 可写范围
+
+        - `workspace/**`
+        - `../default-agent.md`
+
+        ## 禁止范围
+
+        - 禁止写入 `character/`、`knowledge/`、`memory/`、`tasks/`、`tool_outputs/`、`daily/`。
+        - 禁止读取或写入 `settings.local.json`、`.env`、`.key`、`.pem`。
+        - 禁止删除文件、目录、提醒和任务记录。
+
+        ## Python
+
+        - Python 只能在 `workspace/` 内运行。
+        - Python 文件读写限制在 `workspace/` 内。
+        - 禁止 Python 删除、移动、调用子进程或访问网络。
+        - 创建表格和 Word 时优先使用 `scripts/aemeath_tools.py`。
+        """);
+
+        EnsurePythonHelperScript();
+    }
+
+    private static void AppendIfMissing(string path, string marker, string content)
+    {
+        var current = File.Exists(path) ? File.ReadAllText(path) : "";
+        if (current.Contains(marker, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        File.AppendAllText(path, Environment.NewLine + content.Trim() + Environment.NewLine);
+    }
+
+    private void EnsurePythonHelperScript()
+    {
+        var helperPath = Path.Combine(workspaceDirectory, "scripts", "aemeath_tools.py");
+        File.WriteAllText(helperPath, """"
+        import csv
+        import html
+        import json
+        import posixpath
+        import zipfile
+        from pathlib import Path
+        from xml.sax.saxutils import escape
+
+
+        def ensure_parent(path):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+
+        def write_text(path, content, encoding="utf-8"):
+            ensure_parent(path)
+            Path(path).write_text(content or "", encoding=encoding)
+            return str(path)
+
+
+        def read_text(path, encoding="utf-8"):
+            return Path(path).read_text(encoding=encoding)
+
+
+        def write_csv(path, rows, headers=None):
+            ensure_parent(path)
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                if rows and isinstance(rows[0], dict):
+                    fieldnames = headers or list(rows[0].keys())
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(rows)
+                else:
+                    writer = csv.writer(f)
+                    if headers:
+                        writer.writerow(headers)
+                    writer.writerows(rows or [])
+            return str(path)
+
+
+        def create_docx(path, paragraphs, title=None):
+            ensure_parent(path)
+            if isinstance(paragraphs, str):
+                paragraphs = [paragraphs]
+            if title:
+                paragraphs = [title, *list(paragraphs or [])]
+
+            def paragraph_xml(text):
+                return f"<w:p><w:r><w:t xml:space=\"preserve\">{escape(str(text))}</w:t></w:r></w:p>"
+
+            body = "".join(paragraph_xml(item) for item in (paragraphs or []))
+            document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:body>{body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body>
+        </w:document>"""
+            content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+          <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+          <Default Extension="xml" ContentType="application/xml"/>
+          <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        </Types>"""
+            rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>"""
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+                z.writestr("[Content_Types].xml", content_types)
+                z.writestr("_rels/.rels", rels)
+                z.writestr("word/document.xml", document_xml)
+            return str(path)
+
+
+        def create_xlsx(path, rows=None, sheets=None):
+            ensure_parent(path)
+            if sheets is None:
+                sheets = {"Sheet1": rows or []}
+            elif isinstance(sheets, list):
+                sheets = {f"Sheet{i + 1}": sheet for i, sheet in enumerate(sheets)}
+
+            def normalize_rows(data):
+                data = data or []
+                if data and isinstance(data[0], dict):
+                    headers = list(data[0].keys())
+                    return [headers] + [[row.get(h, "") for h in headers] for row in data]
+                return data
+
+            def col_name(index):
+                name = ""
+                while index:
+                    index, rem = divmod(index - 1, 26)
+                    name = chr(65 + rem) + name
+                return name
+
+            def sheet_xml(data):
+                rows_xml = []
+                for r_idx, row in enumerate(normalize_rows(data), start=1):
+                    cells = []
+                    for c_idx, value in enumerate(row or [], start=1):
+                        ref = f"{col_name(c_idx)}{r_idx}"
+                        if isinstance(value, (int, float)) and not isinstance(value, bool):
+                            cells.append(f"<c r=\"{ref}\"><v>{value}</v></c>")
+                        else:
+                            cells.append(f"<c r=\"{ref}\" t=\"inlineStr\"><is><t>{escape(str(value))}</t></is></c>")
+                    rows_xml.append(f"<row r=\"{r_idx}\">{''.join(cells)}</row>")
+                return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{''.join(rows_xml)}</sheetData></worksheet>"""
+
+            sheet_names = list(sheets.keys())
+            workbook_sheets = "".join(
+                f"<sheet name=\"{escape(name)}\" sheetId=\"{i + 1}\" r:id=\"rId{i + 1}\"/>"
+                for i, name in enumerate(sheet_names)
+            )
+            workbook_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>{workbook_sheets}</sheets></workbook>"""
+            workbook_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">""" + "".join(
+                f"<Relationship Id=\"rId{i + 1}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet{i + 1}.xml\"/>"
+                for i in range(len(sheet_names))
+            ) + "</Relationships>"
+            overrides = "".join(
+                f"<Override PartName=\"/xl/worksheets/sheet{i + 1}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"
+                for i in range(len(sheet_names))
+            )
+            content_types = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+          <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+          <Default Extension="xml" ContentType="application/xml"/>
+          <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+          {overrides}
+        </Types>"""
+            root_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+        </Relationships>"""
+
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+                z.writestr("[Content_Types].xml", content_types)
+                z.writestr("_rels/.rels", root_rels)
+                z.writestr("xl/workbook.xml", workbook_xml)
+                z.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
+                for i, name in enumerate(sheet_names):
+                    z.writestr(f"xl/worksheets/sheet{i + 1}.xml", sheet_xml(sheets[name]))
+            return str(path)
+
+
+        def read_json(path):
+            return json.loads(read_text(path))
+
+
+        def write_json(path, data, ensure_ascii=False, indent=2):
+            write_text(path, json.dumps(data, ensure_ascii=ensure_ascii, indent=indent))
+            return str(path)
+        """");
     }
 
     private void EnsureWorkspaceSkills()

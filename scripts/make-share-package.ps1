@@ -40,6 +40,9 @@ dotnet publish $project `
     -p:DebugType=None `
     -p:DebugSymbols=false `
     -o $publishDir
+if ($LASTEXITCODE -ne 0) {
+    throw "dotnet publish failed with exit code $LASTEXITCODE"
+}
 
 $releaseDocs = @(
     "README.md",
@@ -95,6 +98,24 @@ function Join-Chars {
     return -join ($Codes | ForEach-Object { [char]$_ })
 }
 
+$mainExe = Join-Path $publishDir "DockPetWin.exe"
+$startExeName = (Join-Chars @(0x7231,0x5f25,0x65af,0x542f,0x52a8,0x5668)) + ".exe"
+$editorExeName = (Join-Chars @(0x7231,0x5f25,0x65af,0x5c0f,0x5c4b,0x7f16,0x8f91,0x5668)) + ".exe"
+$startExe = Join-Path $publishDir $startExeName
+$editorExe = Join-Path $publishDir $editorExeName
+
+if (Test-Path -LiteralPath $mainExe) {
+    Move-Item -LiteralPath $mainExe -Destination $startExe -Force
+    Copy-Item -LiteralPath $startExe -Destination $editorExe -Force
+}
+
+foreach ($sidecarName in @("D3DCompiler_47_cor3.dll", "PenImc_cor3.dll", "PresentationNative_cor3.dll", "vcruntime140_cor3.dll", "wpfgfx_cor3.dll")) {
+    $sidecarPath = Join-Path $publishDir $sidecarName
+    if (Test-Path -LiteralPath $sidecarPath) {
+        attrib +h $sidecarPath | Out-Null
+    }
+}
+
 function Copy-FirstExistingDirectory {
     param(
         [Parameter(Mandatory = $true)][string[]]$Candidates,
@@ -137,17 +158,40 @@ function New-CleanUserData {
     New-Item -ItemType Directory -Force -Path (Join-Path $workspaceRoot "output") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $workspaceRoot "changes") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $workspaceRoot "rules") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $workspaceRoot "scripts") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $workspaceRoot "skills") | Out-Null
+    foreach ($outputCategory in @("notes", "reports", "sql-output", "spreadsheets", "documents")) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $workspaceRoot "output\$outputCategory") | Out-Null
+    }
 
     $workspaceProject = @(
         "# Aemeath Agent Workspace",
         "",
         "This is the clean local workspace bundled with DockPetWin.",
         "",
-        "- `skills/` stores the bundled desktop skills.",
-        "- `rules/` stores local workspace rules.",
-        "- `changes/` and `output/` are intentionally empty in the share package.",
-        "- Private chats, personal memories, API keys, generated task logs, and local user names are not included.",
+        "## Directories",
+        "",
+        '- `skills/` stores the bundled desktop skills.',
+        '- `rules/` stores local workspace rules.',
+        '- `changes/` records important workflow, skill, rule, or tool changes.',
+        '- `scripts/` stores helper scripts that can be used from the restricted Python tool.',
+        '- `output/notes/YYYY-MM-DD/` stores notes and lightweight text outputs.',
+        '- `output/reports/YYYY-MM-DD/` stores reports.',
+        '- `output/sql-output/YYYY-MM-DD/` stores SQL files.',
+        '- `output/spreadsheets/YYYY-MM-DD/` stores CSV/XLSX-style spreadsheet outputs.',
+        '- `output/documents/YYYY-MM-DD/` stores DOCX-style document outputs.',
+        "",
+        "## Rules",
+        "",
+        '- Every workspace task must follow this `PROJECT.md` and `rules/README.md` first.',
+        "- If the user asks to organize messy files, create indexes, manifests, or categorized copies instead of deleting originals.",
+        '- Important changes must be recorded under `changes/YYYY-MM-DD/task-name/summary.md`.',
+        '- Ordinary outputs must be categorized under `output/<category>/YYYY-MM-DD/`.',
+        '- Python is restricted to this workspace and should use `scripts/aemeath_tools.py` for basic CSV, JSON, DOCX, and XLSX creation.',
+        '- Writable targets are only `workspace/**` and `../default-agent.md`.',
+        "- Deleting files, folders, reminders, or task records is disabled.",
+        "",
+        "Private chats, personal memories, API keys, generated task logs, and local user names are not included.",
         "",
         "New users can fill API keys and personal preferences in DockPetWin settings after first launch."
     )
@@ -157,9 +201,29 @@ function New-CleanUserData {
         "# Workspace Rules",
         "",
         "This folder is reserved for local rules created by the user.",
-        "The share package starts clean so each user can build their own local context."
+        "The share package starts clean so each user can build their own local context.",
+        "",
+        "## Output Categories",
+        "",
+        '- Notes: `output/notes/YYYY-MM-DD/`',
+        '- Reports: `output/reports/YYYY-MM-DD/`',
+        '- SQL: `output/sql-output/YYYY-MM-DD/`',
+        '- Spreadsheets: `output/spreadsheets/YYYY-MM-DD/`',
+        '- Documents: `output/documents/YYYY-MM-DD/`',
+        "",
+        "## Permissions",
+        "",
+        '- Write only inside `workspace/**` or `../default-agent.md`.',
+        "- Do not delete files or directories.",
+        '- Do not read or write API keys, tokens, passwords, `.env`, `.key`, or `.pem` files.',
+        "- When cleaning or organizing, create a new index, manifest, or categorized copy."
     )
     [System.IO.File]::WriteAllLines((Join-Path $workspaceRoot "rules\README.md"), $workspaceRulesReadme, [System.Text.UTF8Encoding]::new($false))
+
+    $pythonHelperSource = Join-Path $sourceAgents "workspace\scripts\aemeath_tools.py"
+    if (Test-Path -LiteralPath $pythonHelperSource) {
+        Copy-Item -LiteralPath $pythonHelperSource -Destination (Join-Path $workspaceRoot "scripts\aemeath_tools.py") -Force
+    }
 
     foreach ($skillName in @("desktop-memory", "skill-creator")) {
         $copied = Copy-FirstExistingDirectory -Candidates @(
@@ -272,10 +336,11 @@ New-CleanUserData -DestinationRoot $publishDir
 $firstRunGuide = @(
     "DockPetWin first run",
     "",
-    "1. Double-click DockPetWin.exe to start.",
-    "2. Before chat, smart home planning, or web search, right-click the pet and open Settings.",
-    "3. In AI chat settings, fill in a DeepSeek API Key or use the DEEPSEEK_API_KEY environment variable.",
-    "4. If you need web search, fill in a Tavily Key or use the TAVILY_API_KEY environment variable.",
+    "1. Double-click the Aemeath launcher executable in the package root to start.",
+    "2. Double-click the Aemeath home editor executable if you need to adjust home layout positions.",
+    "3. Before chat, smart home planning, or web search, right-click the pet and open Settings.",
+    "4. In AI chat settings, fill in a DeepSeek API Key or use the DEEPSEEK_API_KEY environment variable.",
+    "5. If you need web search, fill in a Tavily Key or use the TAVILY_API_KEY environment variable.",
     "",
     "This share package does not include the author's local UserData, chats, home memories, task records, usage statistics, or API keys.",
     "The package includes a clean initial UserData with public character and world settings only."

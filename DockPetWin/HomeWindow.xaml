@@ -72,6 +72,8 @@
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <StackPanel>
                     <TextBlock x:Name="TitleText"
@@ -85,25 +87,43 @@
                                Foreground="{StaticResource MutedBrush}"
                                Margin="0,4,0,0" />
                 </StackPanel>
-                <Button Grid.Column="1"
+                <Button x:Name="ChatButton"
+                        Grid.Column="1"
                         Content="聊天"
                         Width="54"
                         Margin="8,0,6,0"
                         VerticalAlignment="Center"
                         Click="Chat_Click" />
-                <Button Grid.Column="2"
+                <Button x:Name="SettingsButton"
+                        Grid.Column="2"
                         Content="设置"
                         Width="54"
                         Margin="0,0,6,0"
                         VerticalAlignment="Center"
                         Click="Settings_Click" />
-                <Button Grid.Column="3"
+                <Button x:Name="RefreshActivityButton"
+                        Grid.Column="3"
                         Content="换个动作"
                         Width="76"
                         Margin="0,0,6,0"
                         VerticalAlignment="Center"
                         Click="RefreshActivity_Click" />
-                <Button Grid.Column="4"
+                <Button x:Name="ClearBubbleButton"
+                        Grid.Column="4"
+                        Content="清气泡"
+                        Width="64"
+                        Margin="0,0,6,0"
+                        VerticalAlignment="Center"
+                        ToolTip="清除头顶气泡"
+                        Click="ClearBubble_Click" />
+                <Button x:Name="DebugModeButton"
+                        Grid.Column="5"
+                        Content="Debug"
+                        Width="54"
+                        Margin="0,0,6,0"
+                        VerticalAlignment="Center"
+                        Click="ToggleDebugMode_Click" />
+                <Button Grid.Column="6"
                         Content="关门"
                         Width="54"
                         VerticalAlignment="Center"
@@ -175,6 +195,24 @@
                                Panel.ZIndex="4"
                                IsHitTestVisible="False"
                                RenderOptions.BitmapScalingMode="NearestNeighbor" />
+                        <Image x:Name="KitchenStoveLayer"
+                               Canvas.Left="32"
+                               Canvas.Top="235"
+                               Width="205"
+                               Height="249"
+                               Stretch="Uniform"
+                               Panel.ZIndex="4"
+                               IsHitTestVisible="False"
+                               RenderOptions.BitmapScalingMode="NearestNeighbor" />
+                        <Image x:Name="SofaPlushLayer"
+                               Canvas.Left="837"
+                               Canvas.Top="410"
+                               Width="72"
+                               Height="95"
+                               Stretch="Uniform"
+                               Panel.ZIndex="5"
+                               IsHitTestVisible="False"
+                               RenderOptions.BitmapScalingMode="NearestNeighbor" />
                         <Image x:Name="TeaTableLayer"
                                Canvas.Left="338"
                                Canvas.Top="252"
@@ -205,6 +243,91 @@
                                Visibility="Collapsed"
                                Panel.ZIndex="14"
                                RenderOptions.BitmapScalingMode="NearestNeighbor" />
+                        <Border x:Name="DebugSelectionBorder"
+                                BorderBrush="#FF2F80ED"
+                                BorderThickness="3"
+                                Background="#112F80ED"
+                                Visibility="Collapsed"
+                                IsHitTestVisible="False"
+                                Panel.ZIndex="25" />
+                        <Thumb x:Name="DebugResizeThumb"
+                               Width="24"
+                               Height="24"
+                               Visibility="Collapsed"
+                               Panel.ZIndex="26"
+                               DragDelta="DebugResizeThumb_DragDelta"
+                               DragCompleted="DebugThumb_DragCompleted">
+                            <Thumb.Template>
+                                <ControlTemplate TargetType="{x:Type Thumb}">
+                                    <Border Background="#FF2F80ED"
+                                            BorderBrush="White"
+                                            BorderThickness="2" />
+                                </ControlTemplate>
+                            </Thumb.Template>
+                        </Thumb>
+                        <Thumb x:Name="DebugRotateThumb"
+                               Width="24"
+                               Height="24"
+                               Visibility="Collapsed"
+                               Panel.ZIndex="26"
+                               DragDelta="DebugRotateThumb_DragDelta"
+                               DragCompleted="DebugThumb_DragCompleted">
+                            <Thumb.Template>
+                                <ControlTemplate TargetType="{x:Type Thumb}">
+                                    <Ellipse Fill="#FFFFC857"
+                                             Stroke="White"
+                                             StrokeThickness="2" />
+                                </ControlTemplate>
+                            </Thumb.Template>
+                        </Thumb>
+                        <Border x:Name="DebugPanel"
+                                Canvas.Left="34"
+                                Canvas.Top="760"
+                                Panel.ZIndex="30"
+                                Width="980"
+                                Visibility="Collapsed"
+                                Background="#F8FFFFFF"
+                                BorderBrush="#FF2F80ED"
+                                BorderThickness="3"
+                                Padding="10">
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock Text="人物动作"
+                                           VerticalAlignment="Center"
+                                           Margin="0,0,8,0"
+                                           FontWeight="Bold" />
+                                <ComboBox x:Name="DebugPlacementCombo"
+                                          Width="170"
+                                          Margin="0,0,8,0"
+                                          DisplayMemberPath="Label"
+                                          SelectedValuePath="Key"
+                                          SelectionChanged="DebugPlacementCombo_SelectionChanged" />
+                                <TextBlock Text="家具物品"
+                                           VerticalAlignment="Center"
+                                           Margin="8,0,8,0"
+                                           FontWeight="Bold" />
+                                <ComboBox x:Name="DebugFurnitureCombo"
+                                          Width="190"
+                                          Margin="0,0,8,0"
+                                          DisplayMemberPath="Label"
+                                          SelectedValuePath="Key"
+                                          SelectionChanged="DebugFurnitureCombo_SelectionChanged" />
+                                <Button Content="保存"
+                                        Width="58"
+                                        Margin="0,0,8,0"
+                                        Click="SaveDebugLayout_Click" />
+                                <Button x:Name="DebugCookButton"
+                                        Content="做饭预览"
+                                        Width="82"
+                                        Margin="0,0,8,0"
+                                        Click="DebugCook_Click" />
+                                <TextBlock x:Name="DebugInfoText"
+                                           VerticalAlignment="Center"
+                                           Text="拖拽目标移动，蓝色方块缩放，黄色圆点旋转。"
+                                           FontSize="13"
+                                           Width="430"
+                                           TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
                         <Border x:Name="HomeSpeechBubble"
                                 Canvas.Left="760"
                                 Canvas.Top="170"
@@ -224,7 +347,8 @@
                                        LineHeight="30"
                                        Foreground="{StaticResource InkBrush}" />
                         </Border>
-                        <Border Canvas.Left="1200"
+                        <Border x:Name="HomeLogPanel"
+                                Canvas.Left="1200"
                                 Canvas.Top="34"
                                 Panel.ZIndex="20"
                                 Width="420"
@@ -247,7 +371,8 @@
                                            Margin="0,6,0,0" />
                             </StackPanel>
                         </Border>
-                        <Border Canvas.Left="34"
+                        <Border x:Name="ActivityPanel"
+                                Canvas.Left="34"
                                 Canvas.Top="34"
                                 Panel.ZIndex="20"
                                 MaxWidth="360"
