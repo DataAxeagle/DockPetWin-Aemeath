@@ -13,6 +13,7 @@ namespace DockPetWin.Core.Agents;
 public sealed class AgentToolRunner
 {
     private readonly AgentStore store;
+    private readonly ISet<string>? allowedTools;
     private ActiveSkillContext? activeSkill;
     private int toolStep;
     private static readonly JsonSerializerOptions ResultJsonOptions = new()
@@ -22,9 +23,12 @@ public sealed class AgentToolRunner
     };
     private const int MaxSkillDiscoveryDepth = 8;
 
-    public AgentToolRunner(AgentStore store)
+    public AgentToolRunner(AgentStore store, IEnumerable<string>? allowedTools = null)
     {
         this.store = store;
+        this.allowedTools = allowedTools is null
+            ? null
+            : new HashSet<string>(allowedTools.Select(tool => tool.Trim()), StringComparer.OrdinalIgnoreCase);
     }
 
     public bool HasActiveSkill => activeSkill is not null;
@@ -109,6 +113,14 @@ public sealed class AgentToolRunner
     {
         var tool = call.Tool.Trim().ToLowerInvariant();
         toolStep++;
+        if (!IsToolAllowed(tool))
+        {
+            return AgentToolResult.Error(
+                tool,
+                "tool_not_available_in_mode",
+                "沉浸聊天只允许读取角色资料、剧情、世界观，以及桌宠资料区内的文件读写；技能、联网搜索、任务、提醒和手动记忆操作请切换到“工具办事”。");
+        }
+
         try
         {
             return tool switch
@@ -305,6 +317,7 @@ public sealed class AgentToolRunner
     public IReadOnlyList<object> GetModelTools()
     {
         return BuildToolSpecs()
+            .Where(spec => IsToolAllowed(spec.Name))
             .Select(spec =>
             {
                 var properties = new Dictionary<string, object>();
@@ -341,6 +354,11 @@ public sealed class AgentToolRunner
             .ToList();
     }
 
+    private bool IsToolAllowed(string tool)
+    {
+        return allowedTools is null || allowedTools.Contains(tool);
+    }
+
     public static Dictionary<string, string> ParseArgumentJson(string json)
     {
         var args = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -360,7 +378,9 @@ public sealed class AgentToolRunner
 
     private AgentToolResult ToolSpecs()
     {
-        var specs = BuildToolSpecs();
+        var specs = BuildToolSpecs()
+            .Where(spec => IsToolAllowed(spec.Name))
+            .ToArray();
         return AgentToolResult.Success("tool_specs", "已返回工具 schema。", JsonSerializer.Serialize(specs, ResultJsonOptions));
     }
 
@@ -435,7 +455,7 @@ public sealed class AgentToolRunner
             new AgentToolSpec
             {
                 Name = "read_memory",
-                Description = "读取桌宠长期或短期记忆摘要。长期记忆会在启动时自动加载；短期记忆需要时用此工具读取。",
+                Description = "读取桌宠长期或短期记忆。长期记忆会以带权重和衰减规则的原子记录保存，稳定档案会在启动时自动加载；短期记忆需要时用此工具读取。",
                 Arguments = new()
                 {
                     ["type"] = "必填。long 或 short。",
@@ -447,7 +467,7 @@ public sealed class AgentToolRunner
             new AgentToolSpec
             {
                 Name = "save_memory",
-                Description = "把 AI 提炼后的候选记忆真实保存到桌宠记忆文件。用户表达记住、保存、记录、沉淀、以后记得等意图时，由 AI 判断是否调用；不要只用自然语言声称已保存。",
+                Description = "把 AI 提炼后的候选记忆真实保存到桌宠记忆文件，并同步为带权重、置信度和衰减规则的长期原子记录。用户表达记住、保存、记录、沉淀、以后记得等意图时，由 AI 判断是否调用；不要只用自然语言声称已保存。",
                 Arguments = new()
                 {
                     ["content"] = "必填。要保存的候选记忆，必须是提炼后的内容，不要包含询问长期/短期的提示话术。",

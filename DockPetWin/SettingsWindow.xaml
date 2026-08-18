@@ -293,6 +293,12 @@
                                         <TextBlock Text="分钟" VerticalAlignment="Center" Margin="8,0,0,0" Foreground="{StaticResource MutedBrush}" />
                                     </StackPanel>
 
+                                    <TextBlock Grid.Row="5" Grid.Column="0" Text="音乐响应" Style="{StaticResource SettingLabel}" />
+                                    <StackPanel Grid.Row="5" Grid.Column="1" Margin="0,0,0,4">
+                                        <CheckBox x:Name="QQMusicSingingBox" Content="检测到 QQ 音乐播放时进入唱歌动作" />
+                                        <TextBlock Text="检测到 QQ 音乐启动时会提示一句；播放/暂停优先读取 Windows 系统媒体状态，并保留进程检测兜底。" Style="{StaticResource HelpText}" />
+                                    </StackPanel>
+
                                 </Grid>
                             </StackPanel>
                         </Border>

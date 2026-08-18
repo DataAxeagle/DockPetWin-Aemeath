@@ -68,7 +68,10 @@
                MouseLeftButtonDown="CatImage_MouseLeftButtonDown"
                MouseRightButtonUp="CatImage_MouseRightButtonUp">
             <Image.RenderTransform>
-                <ScaleTransform x:Name="MirrorTransform" ScaleX="1" ScaleY="1" />
+                <TransformGroup>
+                    <ScaleTransform x:Name="MirrorTransform" ScaleX="1" ScaleY="1" />
+                    <RotateTransform x:Name="MusicSwayTransform" Angle="0" />
+                </TransformGroup>
             </Image.RenderTransform>
         </Image>
     </Grid>

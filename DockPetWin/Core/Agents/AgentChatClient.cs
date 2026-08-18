@@ -35,18 +35,22 @@ public sealed class AgentChatClient
         string userMessage,
         AgentStore store,
         CancellationToken cancellationToken,
-        Action<AgentToolTrace>? onToolTrace = null)
+        Action<AgentToolTrace>? onToolTrace = null,
+        IEnumerable<string>? allowedTools = null)
     {
         if (!settings.EnableTools)
         {
             return await SendRawAsync(settings, systemPrompt, history, userMessage, cancellationToken);
         }
 
-        var runner = new AgentToolRunner(store);
-        var pendingMemorySaveReply = TryHandlePendingMemorySave(userMessage, history, runner, onToolTrace);
-        if (pendingMemorySaveReply is not null)
+        var runner = new AgentToolRunner(store, allowedTools);
+        if (allowedTools is null)
         {
-            return pendingMemorySaveReply;
+            var pendingMemorySaveReply = TryHandlePendingMemorySave(userMessage, history, runner, onToolTrace);
+            if (pendingMemorySaveReply is not null)
+            {
+                return pendingMemorySaveReply;
+            }
         }
 
         var workingHistory = history.ToList();
@@ -57,7 +61,7 @@ public sealed class AgentChatClient
         var maxRounds = configuredMaxRounds;
         var toolTrace = new List<string>();
         var toolCallCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var routedSkillResult = runner.TryAutoLoadSkillForMessage(userMessage);
+        var routedSkillResult = allowedTools is null ? runner.TryAutoLoadSkillForMessage(userMessage) : null;
         if (routedSkillResult is not null)
         {
             maxRounds = skillMaxRounds;

@@ -13,6 +13,7 @@ public sealed class CatAssetPack
         IReadOnlyList<BitmapImage> transitionPoses,
         IReadOnlyList<BitmapImage> heldPoses,
         IReadOnlyList<BitmapImage> dialoguePoses,
+        IReadOnlyList<BitmapImage> singingFrames,
         string rootPath,
         string? loadError = null)
     {
@@ -22,6 +23,7 @@ public sealed class CatAssetPack
         TransitionPoses = transitionPoses;
         HeldPoses = heldPoses;
         DialoguePoses = dialoguePoses;
+        SingingFrames = singingFrames;
         RootPath = rootPath;
         LoadError = loadError;
     }
@@ -39,10 +41,12 @@ public sealed class CatAssetPack
     public IReadOnlyList<BitmapImage> TransitionPoses { get; }
     public IReadOnlyList<BitmapImage> HeldPoses { get; }
     public IReadOnlyList<BitmapImage> DialoguePoses { get; }
+    public IReadOnlyList<BitmapImage> SingingFrames { get; }
     public string RootPath { get; }
     public string? LoadError { get; }
 
     public double WalkFps => Math.Clamp(Manifest.Animations.Walk.Fps, 1, 24);
+    public double SingFps => Math.Clamp(Manifest.Animations.Sing.Fps, 1, 24);
     public double SourceWidth => Manifest.CanvasWidth > 0 ? Manifest.CanvasWidth : 1254;
     public double SourceHeight => Manifest.CanvasHeight > 0 ? Manifest.CanvasHeight : 1254;
     public WpfSize DefaultSourceSize => new(SourceWidth, SourceHeight);

@@ -19,6 +19,7 @@ public sealed class AppSettings
     public double CatScalePercent { get; set; } = 20;
     public double StartPositionPercent { get; set; } = 75;
     public string? ActivityDisplayID { get; set; }
+    public bool EnableQQMusicSinging { get; set; } = true;
 
     public static AppSettings Defaults => new();
 
@@ -42,7 +43,8 @@ public sealed class AppSettings
             WalkBaseSpeed = WalkBaseSpeed,
             CatScalePercent = CatScalePercent,
             StartPositionPercent = StartPositionPercent,
-            ActivityDisplayID = ActivityDisplayID
+            ActivityDisplayID = ActivityDisplayID,
+            EnableQQMusicSinging = EnableQQMusicSinging
         };
     }
 

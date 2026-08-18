@@ -12,6 +12,7 @@ using DockPetWin.Core.Backup;
 using DockPetWin.Core.CodexBridge;
 using DockPetWin.Core.Agents;
 using DockPetWin.Core.HomeLife;
+using DockPetWin.Core.Media;
 using DockPetWin.Core.Reminder;
 using DockPetWin.Core.Settings;
 using DockPetWin.Core.StateMachine;
@@ -35,6 +36,8 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer restingBlinkFrameTimer = new() { Interval = TimeSpan.FromMilliseconds(120) };
     private readonly DispatcherTimer codexBridgeTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     private readonly DispatcherTimer bubbleAutoHideTimer = new() { Interval = TimeSpan.FromSeconds(5) };
+    private readonly DispatcherTimer musicPlaybackTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly DispatcherTimer musicSwayTimer = new() { Interval = TimeSpan.FromMilliseconds(420) };
     private bool apiSetupHintShown;
     private readonly SettingsStore settingsStore = new();
     private readonly UsageStatisticsStore usageStatisticsStore = new();
@@ -44,6 +47,7 @@ public partial class MainWindow : Window
     private readonly AgentStore agentStore = new();
     private readonly AgentChatClient agentChatClient = new();
     private readonly HomeLifeStore homeLifeStore = new();
+    private readonly MusicPlaybackMonitor musicPlaybackMonitor = new();
     private readonly CatStateMachine stateMachine = new();
     private readonly Random random = new();
 
@@ -69,6 +73,13 @@ public partial class MainWindow : Window
     private string? lastScheduledTaskOutputPath;
     private IReadOnlyList<HomeActivityPlan>? cachedHomeSchedule;
     private DateTime cachedHomeScheduleExpiresAt = DateTime.MinValue;
+    private bool isMusicSingingMode;
+    private int musicPlayingTicks;
+    private int musicStoppedTicks;
+    private int musicSwayStep;
+    private bool wasQQMusicRunning;
+    private bool isShowingQQMusicLaunchMessage;
+    private bool isPollingMusicPlayback;
 
     public MainWindow()
     {
@@ -94,6 +105,8 @@ public partial class MainWindow : Window
         restingBlinkTimer.Tick += (_, _) => BeginRestingBlink();
         restingBlinkFrameTimer.Tick += (_, _) => AdvanceRestingBlink();
         codexBridgeTimer.Tick += (_, _) => PollCodexBridge();
+        musicPlaybackTimer.Tick += async (_, _) => await PollMusicPlaybackAsync();
+        musicSwayTimer.Tick += (_, _) => AdvanceMusicSway();
         bubbleAutoHideTimer.Tick += (_, _) =>
         {
             bubbleAutoHideTimer.Stop();
@@ -106,6 +119,8 @@ public partial class MainWindow : Window
         Closed += (_, _) =>
         {
             homeLifeScheduler?.Stop();
+            musicPlaybackTimer.Stop();
+            musicSwayTimer.Stop();
             SystemEvents.DisplaySettingsChanged -= SystemEvents_DisplaySettingsChanged;
             SystemEvents.PowerModeChanged -= SystemEvents_PowerModeChanged;
             SaveUserData();
@@ -150,6 +165,7 @@ public partial class MainWindow : Window
         statisticsTimer.Start();
         codexBridgeTimer.Start();
         homeLifeScheduler.Start();
+        musicPlaybackTimer.Start();
         UpdateTray();
         Dispatcher.BeginInvoke(MaybeShowApiSetupHint, DispatcherPriority.Background);
     }
@@ -199,6 +215,13 @@ public partial class MainWindow : Window
             TimeSpan.FromSeconds(settings.RestDurationMinimumSeconds),
             TimeSpan.FromSeconds(settings.RestDurationMaximumSeconds));
 
+        if (!settings.EnableQQMusicSinging)
+        {
+            ExitMusicSingingMode(restoreState: true);
+            musicPlayingTicks = 0;
+            musicStoppedTicks = 0;
+        }
+
         if (reposition)
         {
             var anchor = activityArea.AnchorForPercent(settings.StartPositionPercent, petWindow.PetSize);
@@ -240,6 +263,13 @@ public partial class MainWindow : Window
 
     private void ApplyState(CatState state)
     {
+        if (isMusicSingingMode)
+        {
+            ApplyMusicSingingVisual();
+            UpdateTray();
+            return;
+        }
+
         animationTimer.Stop();
         StopRestingBlink();
         activeFrames = [];
@@ -360,9 +390,210 @@ public partial class MainWindow : Window
         restingBlinkFrameIndex = 0;
     }
 
+    private async Task PollMusicPlaybackAsync()
+    {
+        if (isPollingMusicPlayback)
+        {
+            return;
+        }
+
+        isPollingMusicPlayback = true;
+        try
+        {
+            if (!settings.EnableQQMusicSinging)
+            {
+                ExitMusicSingingMode(restoreState: true);
+                wasQQMusicRunning = musicPlaybackMonitor.IsQQMusicRunning();
+                return;
+            }
+
+            var isRunning = musicPlaybackMonitor.IsQQMusicRunning();
+            if (isRunning && !wasQQMusicRunning)
+            {
+                _ = ShowQQMusicLaunchMessageAsync();
+            }
+
+            wasQQMusicRunning = isRunning;
+            if (!isRunning)
+            {
+                musicStoppedTicks++;
+                musicPlayingTicks = 0;
+                if (musicStoppedTicks >= 1)
+                {
+                    ExitMusicSingingMode(restoreState: true);
+                }
+
+                return;
+            }
+
+            var isPlaying = await musicPlaybackMonitor.IsQQMusicPlayingAsync();
+            if (isPlaying)
+            {
+                musicPlayingTicks++;
+                musicStoppedTicks = 0;
+                if (musicPlayingTicks >= 1 && stateMachine.State.Kind != CatStateKind.Dragged)
+                {
+                    EnterMusicSingingMode();
+                }
+
+                return;
+            }
+
+            musicStoppedTicks++;
+            musicPlayingTicks = 0;
+            if (musicStoppedTicks >= 1)
+            {
+                ExitMusicSingingMode(restoreState: true);
+            }
+        }
+        finally
+        {
+            isPollingMusicPlayback = false;
+        }
+    }
+
+    private async Task ShowQQMusicLaunchMessageAsync()
+    {
+        if (isShowingQQMusicLaunchMessage)
+        {
+            return;
+        }
+
+        isShowingQQMusicLaunchMessage = true;
+        try
+        {
+            var message = await BuildQQMusicLaunchMessageAsync();
+            if (activeReminder is null && activeCodexNotification is null)
+            {
+                ShowTransientBubble(message);
+            }
+        }
+        finally
+        {
+            isShowingQQMusicLaunchMessage = false;
+        }
+    }
+
+    private async Task<string> BuildQQMusicLaunchMessageAsync()
+    {
+        var fixedMessage = $"{settings.UserSalutation}，QQ 音乐已经开启啦，我会留意旋律的。";
+        try
+        {
+            var agentSettings = agentStore.LoadSettings();
+            if (string.IsNullOrWhiteSpace(agentSettings.ResolveApiKey()))
+            {
+                return fixedMessage;
+            }
+
+            var prompt = $"""
+            请以爱弥斯的身份生成一句简短提示。
+            当前名称：{settings.CatName}
+            英文标识：{settings.CatIdentifier}
+            对用户称呼：{settings.UserSalutation}
+            场景：检测到用户打开了 QQ 音乐。你要提醒用户 QQ 音乐已开启，并自然表达你会跟着旋律留意/哼唱。
+            要求：只输出一句中文，语气自然，40字以内，不要 Markdown。
+            """;
+            var reply = await agentChatClient.SendAsync(
+                agentSettings,
+                "你是爱弥斯的桌面提示文案生成器，只输出一句提示。",
+                [],
+                prompt,
+                CancellationToken.None);
+            return string.IsNullOrWhiteSpace(reply)
+                ? fixedMessage
+                : TrimBubbleText(reply, 56);
+        }
+        catch
+        {
+            return fixedMessage;
+        }
+    }
+
+    private void EnterMusicSingingMode()
+    {
+        if (isMusicSingingMode)
+        {
+            return;
+        }
+
+        isMusicSingingMode = true;
+        ApplyMusicSingingVisual();
+        UpdateTray();
+    }
+
+    private void ExitMusicSingingMode(bool restoreState)
+    {
+        if (!isMusicSingingMode)
+        {
+            return;
+        }
+
+        isMusicSingingMode = false;
+        StopMusicSway();
+        if (restoreState)
+        {
+            ApplyState(stateMachine.State);
+        }
+        UpdateTray();
+    }
+
+    private void ApplyMusicSingingVisual()
+    {
+        animationTimer.Stop();
+        StopRestingBlink();
+        ApplyStateSourceSize(CatStateKind.Resting);
+
+        activeFrames = assetPack.SingingFrames.Count > 0
+            ? assetPack.SingingFrames
+            : assetPack.DialoguePoses;
+        frameIndex = 0;
+
+        if (activeFrames.Count > 0)
+        {
+            SetFrame(0);
+            if (activeFrames.Count > 1)
+            {
+                animationTimer.Interval = TimeSpan.FromSeconds(1 / assetPack.SingFps);
+                animationTimer.Start();
+            }
+        }
+        else
+        {
+            SetRandomImage(assetPack.RestingBasePoses.Count > 0 ? assetPack.RestingBasePoses : assetPack.RestingPoses);
+        }
+
+        StartMusicSway();
+    }
+
+    private void StartMusicSway()
+    {
+        musicSwayStep = 0;
+        MusicSwayTransform.Angle = -2.5;
+        musicSwayTimer.Stop();
+        musicSwayTimer.Start();
+    }
+
+    private void AdvanceMusicSway()
+    {
+        if (!isMusicSingingMode)
+        {
+            StopMusicSway();
+            return;
+        }
+
+        musicSwayStep++;
+        MusicSwayTransform.Angle = musicSwayStep % 2 == 0 ? -2.5 : 2.5;
+    }
+
+    private void StopMusicSway()
+    {
+        musicSwayTimer.Stop();
+        MusicSwayTransform.Angle = 0;
+    }
+
     private void AdvancePosition()
     {
-        if (stateMachine.State.Kind != CatStateKind.Walking)
+        if (isMusicSingingMode || stateMachine.State.Kind != CatStateKind.Walking)
         {
             return;
         }
@@ -427,6 +658,7 @@ public partial class MainWindow : Window
         }
 
         stateTimer.Stop();
+        ExitMusicSingingMode(restoreState: false);
         stateMachine.BeginDrag();
         DragMove();
         var anchor = petWindow.CurrentAnchor(activityArea.Edge);
@@ -1349,7 +1581,7 @@ public partial class MainWindow : Window
     {
         trayIcon?.Update(
             IsVisible,
-            stateMachine.State.Kind == CatStateKind.Walking,
+            !isMusicSingingMode && stateMachine.State.Kind == CatStateKind.Walking,
             StatusText(),
             null);
     }
@@ -1409,6 +1641,11 @@ public partial class MainWindow : Window
 
     private string StatusText()
     {
+        if (isMusicSingingMode)
+        {
+            return $"{settings.CatName}正在跟着 QQ 音乐轻轻唱歌";
+        }
+
         return stateMachine.State.Kind switch
         {
             CatStateKind.Walking => $"{settings.CatName}正在散步",

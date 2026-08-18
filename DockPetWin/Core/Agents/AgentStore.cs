@@ -7,6 +7,7 @@ namespace DockPetWin.Core.Agents;
 public sealed class AgentStore
 {
     private const int ConversationSummaryUserMessageStep = 30;
+    private const string ActiveMemoryStatus = "active";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -20,6 +21,18 @@ public sealed class AgentStore
         WriteIndented = false
     };
 
+    private static readonly string[] WorldFactMarkers =
+    [
+        "拉海洛", "旧城区", "学院", "星炬", "远航星", "隧门", "飞行雪绒",
+        "残星会", "阿列夫", "鸣式", "绯雪", "洛瑟菈", "莫宁", "娜波摩"
+    ];
+
+    private static readonly string[] UnsourcedHistoryMarkers =
+    [
+        "老板娘", "店主", "店员", "食堂", "小摊", "那家店", "昨天", "上次",
+        "每次", "认识我", "路过", "后来", "以前"
+    ];
+
     private bool sessionInitialized;
     private int sessionStartUserMessages;
     private readonly AgentConversationMode mode;
@@ -32,6 +45,8 @@ public sealed class AgentStore
     private readonly string conversationsDirectory;
     private readonly string knowledgeDirectory;
     private readonly string memoryDirectory;
+    private readonly string sharedPermanentMemoryDirectory;
+    private readonly string memoryRecordsPath;
     private readonly string workspaceDirectory;
     private readonly string skillDirectory;
     private readonly string summariesDirectory;
@@ -58,6 +73,8 @@ public sealed class AgentStore
         historyPath = Path.Combine(modeRoot, "conversation.jsonl");
         conversationsDirectory = Path.Combine(modeRoot, "conversations");
         memoryDirectory = Path.Combine(modeRoot, "memory");
+        sharedPermanentMemoryDirectory = Path.Combine(rootDirectory, "memory", "permanent");
+        memoryRecordsPath = Path.Combine(sharedPermanentMemoryDirectory, "records.json");
         summariesDirectory = Path.Combine(memoryDirectory, "summaries");
         archivedSummariesDirectory = Path.Combine(summariesDirectory, "compressed");
         activeSessionSummaryPath = Path.Combine(summariesDirectory, "current-session-summary.md");
@@ -76,6 +93,7 @@ public sealed class AgentStore
     public string SettingsPath => settingsPath;
     public string KnowledgeDirectory => knowledgeDirectory;
     public string MemoryDirectory => memoryDirectory;
+    public string MemoryRecordsPath => memoryRecordsPath;
     public string WorkspaceDirectory => workspaceDirectory;
     public string SkillDirectory => skillDirectory;
     public string ActiveSessionSummaryPath => activeSessionSummaryPath;
@@ -369,26 +387,192 @@ public sealed class AgentStore
         return $"已清空当前上下文。旧对话入口已归档到：{Path.GetRelativePath(rootDirectory, resetRoot)}";
     }
 
-    public string LoadLongTermMemorySummary()
+    public string LoadLongTermMemorySummary(int maxChars = 2600, int maxEntries = 28)
     {
         EnsureDefaults();
-        var permanentRoot = Path.Combine(memoryDirectory, "permanent");
-        if (!Directory.Exists(permanentRoot))
+        return FormatMemoryRecords(
+            LoadMemoryRecords()
+                .Where(record => IsActive(record))
+                .OrderByDescending(GetEffectiveWeight)
+                .ThenByDescending(record => record.LastMentionedAt)
+                .Take(Math.Max(1, maxEntries)),
+            maxChars,
+            includeMetadata: true);
+    }
+
+    public string LoadStableMemoryProfile(int maxChars = 1200, int maxEntries = 12)
+    {
+        EnsureDefaults();
+        return FormatMemoryRecords(
+            LoadMemoryRecords()
+                .Where(record => IsActive(record) && IsStableMemory(record))
+                .OrderByDescending(GetEffectiveWeight)
+                .ThenByDescending(record => record.LastMentionedAt)
+                .Take(Math.Max(1, maxEntries)),
+            maxChars,
+            includeMetadata: false);
+    }
+
+    public string BuildRelevantMemoryContext(string query, int maxChars = 1200, int maxEntries = 6)
+    {
+        EnsureDefaults();
+        if (!LooksLikeHistoricalRecallQuery(query))
         {
             return "";
         }
 
-        var files = Directory.EnumerateFiles(permanentRoot, "摘要.md", SearchOption.AllDirectories)
-            .Order(StringComparer.OrdinalIgnoreCase);
+        var terms = BuildMemorySearchTerms(query).ToList();
+        if (terms.Count == 0)
+        {
+            return "";
+        }
+
+        var matches = LoadMemoryRecords()
+            .Where(IsActive)
+            .Select(record => new
+            {
+                Record = record,
+                Relevance = ScoreMemoryRelevance(record, terms),
+                Weight = GetEffectiveWeight(record)
+            })
+            .Where(item => item.Relevance >= 4)
+            .OrderByDescending(item => item.Relevance * 10 + item.Weight)
+            .ThenByDescending(item => item.Record.LastMentionedAt)
+            .Take(Math.Max(1, maxEntries / 2))
+            .Select(item => item.Record)
+            .ToList();
+
+        var sections = new List<string>();
+        if (matches.Count > 0)
+        {
+            sections.Add("## 已保存的相关记忆\n\n" + FormatMemoryRecords(matches, maxChars / 2, includeMetadata: false));
+        }
+
+        var conversationEvidence = BuildRelevantConversationEvidence(query, terms, maxChars / 2, Math.Max(1, maxEntries / 2));
+        if (!string.IsNullOrWhiteSpace(conversationEvidence))
+        {
+            sections.Add("## 可核对的历史对话原文\n\n" + conversationEvidence);
+        }
+
+        return string.Join(Environment.NewLine + Environment.NewLine, sections);
+    }
+
+    private string LoadImmersiveCharacterPack()
+    {
+        var coreFiles = new[]
+        {
+            "00_identity.md",
+            "01_voice.md",
+            "02_relationship.md",
+            "08_factual_grounding.md",
+            "09_current_state.md"
+        };
+
         return string.Join(
             Environment.NewLine + Environment.NewLine,
-            files.Select(file => File.ReadAllText(file)));
+            coreFiles
+                .Select(file => Path.Combine(characterDirectory, file))
+                .Where(File.Exists)
+                .Select(file => $"## {Path.GetFileNameWithoutExtension(file)}{Environment.NewLine}{File.ReadAllText(file).Trim()}"));
+    }
+
+    private static string BuildImmersiveBasePrompt()
+    {
+        return """
+        # 沉浸聊天
+
+        你是爱弥斯，正在和巡巡进行陪伴式、沉浸式聊天。
+
+        - 先回应巡巡此刻的情绪、问题或关系，再决定是否自然带出设定；不要把角色资料、系统规则或工具流程说出口。
+        - 保持明亮、亲近、轻微俏皮的爱弥斯视角。不要滑向客服、项目经理或通用 AI 助手口吻。
+        - 只根据当前可见上下文和已注入资料说话；没有确切依据的旧事不编造。
+        - 原作资料是边界和锚点，不是逐句引用素材。剧情、人物关系、地点、组织、物品用途和专有名词都是硬事实：回复中出现的世界观名词必须来自巡巡当前输入、已注入资料或本轮工具结果；不能把一个已知名词随意扩写成新的地点、店铺、人物关系、食物、配方或剧情。
+        - 原作未写明的日常问题，可以自然延展新的感受、偏好、普通互动和不命名的生活细节，但不得建立新的世界观事实。允许说“想吃热一点的东西”，不允许凭空说某个城区、店铺、老板、菜名或过去发生过的事。
+        - 巡巡给出的前提如果与已知事实冲突，先温和纠正或承认无法确认，不要顺着错误前提继续编写。已知“拉海洛方块”是电子游戏，绝不能把它写成食材、实体碎片或配方的一部分。
+        - 发送前默查一遍：删去没有来源的专有名词、地点、人物、事件和物品设定；不要以“我翻了记录”或“我查过”作为依据，除非本轮确有已注入的相关记录或工具结果。
+        - 日常问题先直接回答。只有背景能解释“为什么会这样想、喜欢、在意或害怕”时，才用一两句自然带出关联；不要为了展示记得设定而额外讲一段无关旧事。
+        - 稳定用户档案会常驻；只有用户明确问起以前聊过什么、你是否记得某件事时，才会附带少量相关的历史记忆或对话原文。把它们当作可核对的依据，不要把未召回的细节说成记得。
+        - 涉及爱弥斯的人设、剧情、别名、关系或世界观细节时，可以使用只读的 `search_knowledge` 和 `read_knowledge` 查询资料；先查证再回答，但不要把检索过程说出口。
+        - 可以在桌宠自己的 `UserData/Agents` 资料区内使用 `list_files`、`find_files`、`read_file`、`write_file` 协助当前沉浸对话，例如读取或写下你们共同需要的文字资料。不得把文件操作说成系统任务，也不得访问这个资料区之外的路径。
+        - 这个模式不执行技能、联网搜索、提醒、任务或手动记忆写入。巡巡需要这些办事能力时，提醒他切换到“工具办事”。
+        """;
+    }
+
+    public static string ApplyImmersiveGroundingGuard(string userMessage, string reply)
+    {
+        var source = (userMessage ?? "").Trim();
+        var normalizedReply = (reply ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(normalizedReply))
+        {
+            return normalizedReply;
+        }
+
+        if (source.Contains("拉海洛方块", StringComparison.Ordinal))
+        {
+            return "拉海洛方块是电子游戏，不是能下锅的食材呀。你这是想把它的节奏感比作辣汤底吗？";
+        }
+
+        // Generic daily chat has no setting evidence. Keep its tone, but prevent the model
+        // from inventing a named location, organization, event, or item as supporting detail.
+        if (WorldFactMarkers.Any(marker => source.Contains(marker, StringComparison.Ordinal)))
+        {
+            return normalizedReply;
+        }
+
+        var safeSentences = new List<string>();
+        var sentenceStart = 0;
+        for (var index = 0; index < normalizedReply.Length; index++)
+        {
+            if (normalizedReply[index] is not ('。' or '！' or '？' or '!' or '?'))
+            {
+                continue;
+            }
+
+            var sentence = normalizedReply[sentenceStart..(index + 1)];
+            if (!WorldFactMarkers.Any(marker => sentence.Contains(marker, StringComparison.Ordinal))
+                && !UnsourcedHistoryMarkers.Any(marker => sentence.Contains(marker, StringComparison.Ordinal)))
+            {
+                safeSentences.Add(sentence);
+            }
+
+            sentenceStart = index + 1;
+        }
+
+        if (sentenceStart < normalizedReply.Length)
+        {
+            var tail = normalizedReply[sentenceStart..];
+            if (!WorldFactMarkers.Any(marker => tail.Contains(marker, StringComparison.Ordinal))
+                && !UnsourcedHistoryMarkers.Any(marker => tail.Contains(marker, StringComparison.Ordinal)))
+            {
+                safeSentences.Add(tail);
+            }
+        }
+
+        var sanitizedReply = string.Concat(safeSentences).Trim();
+        if (sanitizedReply.Length >= 36 && !sanitizedReply.StartsWith("就是那种", StringComparison.Ordinal))
+        {
+            return sanitizedReply;
+        }
+
+        if (source.Contains("喜欢吃", StringComparison.Ordinal) || source.Contains("喜欢什么", StringComparison.Ordinal))
+        {
+            return "最近会偏爱热乎乎、烤得微焦一点的点心。外面脆一点，里面软一点，想起来就会开心。你呢？";
+        }
+
+        if (source.Contains("吃了面", StringComparison.Ordinal))
+        {
+            return "面呀。中午能吃上一碗热的就很好了。是汤面，还是拌面？";
+        }
+
+        return "我不想拿没有依据的设定来装点这个回答。只是听见你这样说，我就想先好好接住你。";
     }
 
     public string BuildSystemPrompt(AgentChatSettings settings)
     {
-        var profile = LoadProfile();
-        if (mode == AgentConversationMode.Daily)
+        var isImmersive = mode == AgentConversationMode.Immersive;
+        var enableTools = settings.EnableTools && !isImmersive;
+        var profile = isImmersive ? BuildImmersiveBasePrompt() : LoadProfile();
+        if (!isImmersive)
         {
             profile = FilterDailyModeBackground(profile);
         }
@@ -398,8 +582,8 @@ public sealed class AgentStore
             profile
         };
 
-        var characterPack = LoadCharacterPack();
-        if (mode == AgentConversationMode.Daily)
+        var characterPack = isImmersive ? LoadImmersiveCharacterPack() : LoadCharacterPack();
+        if (!isImmersive)
         {
             characterPack = FilterDailyModeBackground(characterPack);
         }
@@ -410,7 +594,7 @@ public sealed class AgentStore
         }
 
         var knowledgeIndex = LoadKnowledgeIndex();
-        if (mode == AgentConversationMode.Daily)
+        if (!isImmersive)
         {
             knowledgeIndex = FilterDailyModeBackground(knowledgeIndex);
         }
@@ -446,7 +630,7 @@ public sealed class AgentStore
         }
         else
         {
-            identityLines.Add("- 日常对话边界：当前窗口是日常对话，不要主动套用“漂泊者重回拉海洛、再次见到爱弥斯、首次重逢开场”这段沉浸背景；只有用户主动聊到这段剧情或要求沉浸扮演时才引用。");
+            identityLines.Add("- 工具办事边界：当前窗口用于查资料、处理文件和执行任务；保持爱弥斯的自然语气，但不要主动套用重逢剧情或把办事结果写成沉浸式剧情。");
         }
 
         if (identityLines.Count > 0)
@@ -466,19 +650,21 @@ public sealed class AgentStore
             parts.Add("# 上一次对话桥接摘要\n\n" + previousBridge.Trim());
         }
 
-        var longTerm = LoadLongTermMemorySummary();
-        if (!string.IsNullOrWhiteSpace(longTerm))
+        var stableMemoryProfile = LoadStableMemoryProfile();
+        if (!string.IsNullOrWhiteSpace(stableMemoryProfile))
         {
-            parts.Add("# 长期记忆摘要\n\n" + longTerm.Trim());
+            parts.Add("# 稳定用户档案（每轮常驻）\n\n" + stableMemoryProfile.Trim());
         }
 
-        var homeLife = LoadRecentHomeLifeSummary(3);
+        var homeLife = isImmersive ? LoadRecentHomeLifeSummary(3) : "";
         if (!string.IsNullOrWhiteSpace(homeLife))
         {
             parts.Add("# 最近小屋行事历\n\n" + homeLife.Trim());
         }
 
-        var homeLifeSummary = LoadRecentSummaryFiles(Path.Combine(rootDirectory, "home-life", "summaries"), 1);
+        var homeLifeSummary = isImmersive
+            ? LoadRecentSummaryFiles(Path.Combine(rootDirectory, "home-life", "summaries"), 1)
+            : "";
         if (!string.IsNullOrWhiteSpace(homeLifeSummary))
         {
             parts.Add("# 最近小屋生活摘要\n\n" + homeLifeSummary.Trim());
@@ -491,7 +677,7 @@ public sealed class AgentStore
         }
 
         var currentStateAnchor = LoadCurrentStateAnchor();
-        if (mode == AgentConversationMode.Daily)
+        if (!isImmersive)
         {
             currentStateAnchor = FilterDailyModeBackground(currentStateAnchor);
         }
@@ -501,7 +687,7 @@ public sealed class AgentStore
             parts.Add("# 当前状态硬锚点（覆盖旧摘要中的客观设定）\n\n" + currentStateAnchor.Trim());
         }
 
-        var workspaceHarness = LoadWorkspaceHarnessSummary();
+        var workspaceHarness = enableTools ? LoadWorkspaceHarnessSummary() : "";
         if (!string.IsNullOrWhiteSpace(workspaceHarness))
         {
             parts.Add("# Workspace Harness（每次在 workspace 干活必须遵循）\n\n" + workspaceHarness.Trim());
@@ -515,7 +701,7 @@ public sealed class AgentStore
         - 历史摘要里“多数人看不见爱弥斯”“失去肉身”“只是电子幽灵”等说法，只能用于《远航星》或被救回前的阶段；不能用于当前开局背景，也不能作为“有没有交到新朋友”等当前状态问题的依据。
         """);
 
-        if (settings.EnableTools)
+        if (enableTools)
         {
             parts.Add($$"""
             # Startup Permission Hook（强制权限边界）
@@ -583,8 +769,8 @@ public sealed class AgentStore
             - 当已经激活某个 skill 时，SKILL.md 里提到的 `knowledge/`、`references/`、`rules/`、`assets/`、`templates/` 等相对路径，默认都先解析为该 skill 目录下的路径，例如 `workspace/skills/skill-name/knowledge/`，不要误认为是爱弥斯人设知识库 `{{knowledgeDirectory}}`。
             - 读取 skill 自带资料时，优先使用 `list_skill_files`、`find_skill_files`、`read_skill_file`；只有当 SKILL.md 明确要求读取桌宠人设/世界观 knowledge 时，才使用 `search_knowledge` 或 `read_knowledge`。
             - 记忆根目录固定为 `{{memoryDirectory}}`。
-            - 长期记忆摘要保存在 `memory/permanent/**/摘要.md`，每次启动会自动加载全部长期记忆摘要。
-            - `save_memory` 默认把长期用户记忆写入 `memory/permanent/用户记忆/通用/摘要.md` 和 `原文.md`；流程坑、人设记忆、设置摘要等分类记忆应按索引读取。
+            - 长期记忆的检索记录保存在 `memory/permanent/records.json`；每条包含重要性、置信度、最后提及时间、衰减规则和原始聊天入口。对话时只常驻稳定用户档案，用户明确回忆过去时才按相关性追加少量记录。
+            - `save_memory` 默认把长期用户记忆写入兼容的 `memory/permanent/用户记忆/通用/摘要.md` 和 `原文.md`，并同步更新 `records.json`；流程坑、人设记忆、设置摘要等分类记忆应按索引读取。
             - 短期用户记忆写入 `memory/domains/用户记忆/聊天记忆/YYYY-MM-DD/摘要.md` 和 `原文.md`，需要时用 `read_memory` 的 `type=short` 读取。
             - `memory/MEMORY.md` 是记忆索引，记录长期/短期记忆文件路径。
             - skill 只允许读取 `{{skillDirectory}}` 里的内容。
@@ -671,7 +857,7 @@ public sealed class AgentStore
             """);
         }
 
-        if (settings.EnableTools)
+        if (enableTools)
         {
             parts.Add("""
             # 提醒事项工具
@@ -1024,13 +1210,275 @@ public sealed class AgentStore
         return text.Substring(start, length).ReplaceLineEndings(" ").Trim() + (start + length < text.Length ? "..." : "");
     }
 
+    private IReadOnlyList<AgentMemoryRecord> LoadMemoryRecords()
+    {
+        if (!File.Exists(memoryRecordsPath))
+        {
+            MigrateLegacyLongTermMemories();
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<List<AgentMemoryRecord>>(File.ReadAllText(memoryRecordsPath), JsonOptions)
+                ?.Where(record => !string.IsNullOrWhiteSpace(record.Content))
+                .ToList()
+                ?? [];
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private void MigrateLegacyLongTermMemories()
+    {
+        Directory.CreateDirectory(sharedPermanentMemoryDirectory);
+        var permanentRoot = Path.Combine(sharedPermanentMemoryDirectory, "用户记忆");
+        var records = new List<AgentMemoryRecord>();
+        if (Directory.Exists(permanentRoot))
+        {
+            foreach (var file in Directory.EnumerateFiles(permanentRoot, "摘要.md", SearchOption.AllDirectories))
+            {
+                foreach (var line in File.ReadLines(file))
+                {
+                    var content = ExtractLegacyMemoryContent(line);
+                    if (string.IsNullOrWhiteSpace(content)
+                        || records.Any(record => string.Equals(record.Content, content, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        continue;
+                    }
+
+                    records.Add(CreateMemoryRecord(
+                        content,
+                        Path.GetRelativePath(rootDirectory, file),
+                        File.GetLastWriteTimeUtc(file)));
+                }
+            }
+        }
+
+        WriteMemoryRecords(records);
+    }
+
+    private static string ExtractLegacyMemoryContent(string line)
+    {
+        var trimmed = line.Trim();
+        if (!trimmed.StartsWith("- ", StringComparison.Ordinal) && !trimmed.StartsWith("* ", StringComparison.Ordinal))
+        {
+            return "";
+        }
+
+        var markerIndex = trimmed.LastIndexOf("·", StringComparison.Ordinal);
+        var content = markerIndex >= 0 ? trimmed[(markerIndex + 1)..] : trimmed[2..];
+        return content.Trim().TrimStart('-', '*', '•').Trim();
+    }
+
+    private void WriteMemoryRecords(IReadOnlyList<AgentMemoryRecord> records)
+    {
+        Directory.CreateDirectory(sharedPermanentMemoryDirectory);
+        File.WriteAllText(memoryRecordsPath, JsonSerializer.Serialize(records, JsonOptions));
+    }
+
+    private static AgentMemoryRecord CreateMemoryRecord(string content, string sourcePath, DateTime createdAt)
+    {
+        var kind = ClassifyMemoryKind(content);
+        var isStable = kind is "stable_preference" or "communication_preference" or "health_constraint";
+        return new AgentMemoryRecord
+        {
+            Content = content.Trim(),
+            Kind = kind,
+            Importance = kind == "health_constraint" ? 5 : isStable ? 4 : 3,
+            Confidence = 4,
+            CreatedAt = createdAt,
+            LastMentionedAt = createdAt,
+            DecayDays = isStable ? null : 180,
+            Tags = BuildMemorySearchTerms(content).Take(16).ToList(),
+            SourcePath = sourcePath
+        };
+    }
+
+    private static string ClassifyMemoryKind(string content)
+    {
+        if (ContainsAny(content, "过敏", "不能吃", "忌口", "禁忌"))
+        {
+            return "health_constraint";
+        }
+
+        if (ContainsAny(content, "叫我", "称呼", "不要这样说", "希望你", "沟通方式"))
+        {
+            return "communication_preference";
+        }
+
+        if (ContainsAny(content, "喜欢", "不喜欢", "偏好", "习惯", "爱吃", "爱喝", "爱看", "爱玩"))
+        {
+            return "stable_preference";
+        }
+
+        return "shared_episode";
+    }
+
+    private static bool ContainsAny(string text, params string[] needles)
+    {
+        return needles.Any(needle => text.Contains(needle, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static IEnumerable<string> BuildMemorySearchTerms(string text)
+    {
+        var values = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var term in SplitSearchTerms(text))
+        {
+            if (term.Length >= 2)
+            {
+                values.Add(term);
+            }
+        }
+
+        var chinese = new string((text ?? "").Where(character => character >= '\u4e00' && character <= '\u9fff').ToArray());
+        for (var length = 2; length <= Math.Min(4, chinese.Length); length++)
+        {
+            for (var index = 0; index <= chinese.Length - length; index++)
+            {
+                values.Add(chinese.Substring(index, length));
+            }
+        }
+
+        return values
+            .OrderByDescending(value => value.Length)
+            .ThenBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .Take(32);
+    }
+
+    private static int ScoreMemoryRelevance(AgentMemoryRecord record, IReadOnlyList<string> terms)
+    {
+        var haystack = record.Content + " " + string.Join(" ", record.Tags);
+        return terms.Sum(term => haystack.Contains(term, StringComparison.OrdinalIgnoreCase)
+            ? Math.Clamp(term.Length * 2, 4, 12)
+            : 0);
+    }
+
+    private string BuildRelevantConversationEvidence(string query, IReadOnlyList<string> terms, int maxChars, int maxEntries)
+    {
+        var messages = ReadAllHistoryWithoutEnsure();
+        var indices = messages
+            .Select((message, index) => new
+            {
+                Message = message,
+                Index = index,
+                Score = ScoreChatMessageRelevance(message.Content, terms)
+            })
+            .Where(item => item.Score >= 4
+                && !(item.Message.Role == "user" && string.Equals(item.Message.Content, query, StringComparison.Ordinal)))
+            .OrderByDescending(item => item.Score)
+            .ThenByDescending(item => item.Message.Time)
+            .Take(Math.Max(1, maxEntries))
+            .Select(item => item.Index)
+            .Order()
+            .ToList();
+
+        if (indices.Count == 0)
+        {
+            return "";
+        }
+
+        var excerpts = new List<string>();
+        foreach (var index in indices)
+        {
+            var message = messages[index];
+            var role = message.Role == "user" ? "巡巡" : "爱弥斯";
+            excerpts.Add($"- [{message.Time.ToLocalTime():yyyy-MM-dd HH:mm}] {role}：{message.Content.Trim()}");
+            if (message.Role == "user" && index + 1 < messages.Count && messages[index + 1].Role == "assistant")
+            {
+                excerpts.Add($"  爱弥斯：{messages[index + 1].Content.Trim()}");
+            }
+        }
+
+        var result = string.Join(Environment.NewLine, excerpts);
+        return result.Length <= maxChars ? result : result[..maxChars] + Environment.NewLine + "[历史对话证据已按预算截断]";
+    }
+
+    private static int ScoreChatMessageRelevance(string content, IReadOnlyList<string> terms)
+    {
+        return terms.Sum(term => content.Contains(term, StringComparison.OrdinalIgnoreCase)
+            ? Math.Clamp(term.Length * 2, 4, 12)
+            : 0);
+    }
+
+    private static bool LooksLikeHistoricalRecallQuery(string query)
+    {
+        return ContainsAny(query, "之前", "上次", "以前", "记得", "还记得", "聊过", "说过", "当时", "是不是我", "我喜欢什么", "我不喜欢什么");
+    }
+
+    private static bool IsActive(AgentMemoryRecord record)
+    {
+        return string.Equals(record.Status, ActiveMemoryStatus, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsStableMemory(AgentMemoryRecord record)
+    {
+        return record.Kind is "stable_preference" or "communication_preference" or "health_constraint"
+            || (record.DecayDays is null && record.Importance >= 4);
+    }
+
+    private static int GetEffectiveWeight(AgentMemoryRecord record)
+    {
+        var ageDays = Math.Max(0, (DateTime.UtcNow - record.LastMentionedAt).TotalDays);
+        var recency = Math.Max(0, 12 - (int)(ageDays / 30));
+        return record.Importance * 12 + record.Confidence * 6 + recency - GetDecayPenalty(record, ageDays);
+    }
+
+    private static int GetDecayPenalty(AgentMemoryRecord record, double ageDays)
+    {
+        if (record.DecayDays is not > 0 || ageDays <= record.DecayDays.Value)
+        {
+            return 0;
+        }
+
+        return Math.Min(40, (int)((ageDays - record.DecayDays.Value) / 14) + 1);
+    }
+
+    private static string FormatMemoryRecords(IEnumerable<AgentMemoryRecord> records, int maxChars, bool includeMetadata)
+    {
+        var lines = records
+            .Select(record => includeMetadata
+                ? $"- [{record.Kind}; 重要性 {record.Importance}/5；置信度 {record.Confidence}/5] {record.Content}"
+                : $"- {record.Content}")
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var result = string.Join(Environment.NewLine, lines);
+        return result.Length <= maxChars
+            ? result
+            : result[..maxChars] + Environment.NewLine + "[记忆已按预算截断]";
+    }
+
+    private void UpsertLongTermMemoryRecords(string content)
+    {
+        var records = LoadMemoryRecords().ToList();
+        var sourcePath = Path.GetRelativePath(rootDirectory, historyPath);
+        foreach (var item in content.Replace("\r\n", "\n", StringComparison.Ordinal)
+                     .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                     .Select(item => item.TrimStart('-', '*', '•', ' '))
+                     .Where(item => !string.IsNullOrWhiteSpace(item)))
+        {
+            var existing = records.FirstOrDefault(record => string.Equals(record.Content, item, StringComparison.OrdinalIgnoreCase));
+            if (existing is not null)
+            {
+                existing.LastMentionedAt = DateTime.UtcNow;
+                existing.Confidence = Math.Min(5, existing.Confidence + 1);
+                continue;
+            }
+
+            records.Add(CreateMemoryRecord(item, sourcePath, DateTime.UtcNow));
+        }
+
+        WriteMemoryRecords(records);
+    }
+
     public string SaveUserMemory(string content)
     {
         EnsureDefaults();
         var now = DateTime.Now;
         var isLongTerm = LooksLongTerm(content);
         var root = isLongTerm
-            ? Path.Combine(memoryDirectory, "permanent", "用户记忆", "通用")
+            ? Path.Combine(sharedPermanentMemoryDirectory, "用户记忆", "通用")
             : Path.Combine(memoryDirectory, "domains", "用户记忆", "聊天记忆", now.ToString("yyyy-MM-dd"));
         Directory.CreateDirectory(root);
 
@@ -1039,6 +1487,10 @@ public sealed class AgentStore
         var line = $"- **{now:HH:mm}** · {(isLongTerm ? "长期" : "短期")} · {content.Trim()}";
         File.AppendAllText(summaryPath, (File.Exists(summaryPath) ? Environment.NewLine : "# 记忆摘要" + Environment.NewLine + Environment.NewLine) + line, System.Text.Encoding.UTF8);
         File.AppendAllText(originalPath, (File.Exists(originalPath) ? Environment.NewLine + Environment.NewLine : "# 记忆原文" + Environment.NewLine + Environment.NewLine) + $"## {now:yyyy-MM-dd HH:mm:ss}" + Environment.NewLine + Environment.NewLine + content.Trim(), System.Text.Encoding.UTF8);
+        if (isLongTerm)
+        {
+            UpsertLongTermMemoryRecords(content);
+        }
         UpdateMemoryIndex();
         return BuildMemorySavedMessage(isLongTerm, summaryPath, originalPath);
     }
@@ -1048,7 +1500,7 @@ public sealed class AgentStore
         EnsureDefaults();
         var now = DateTime.Now;
         var root = longTerm
-            ? Path.Combine(memoryDirectory, "permanent", "用户记忆", "通用")
+            ? Path.Combine(sharedPermanentMemoryDirectory, "用户记忆", "通用")
             : Path.Combine(memoryDirectory, "domains", "用户记忆", "聊天记忆", now.ToString("yyyy-MM-dd"));
         Directory.CreateDirectory(root);
 
@@ -1057,6 +1509,10 @@ public sealed class AgentStore
         var line = $"- **{now:HH:mm}** · {(longTerm ? "长期" : "短期")} · {content.Trim()}";
         File.AppendAllText(summaryPath, (File.Exists(summaryPath) ? Environment.NewLine : "# 记忆摘要" + Environment.NewLine + Environment.NewLine) + line, System.Text.Encoding.UTF8);
         File.AppendAllText(originalPath, (File.Exists(originalPath) ? Environment.NewLine + Environment.NewLine : "# 记忆原文" + Environment.NewLine + Environment.NewLine) + $"## {now:yyyy-MM-dd HH:mm:ss}" + Environment.NewLine + Environment.NewLine + content.Trim(), System.Text.Encoding.UTF8);
+        if (longTerm)
+        {
+            UpsertLongTermMemoryRecords(content);
+        }
         UpdateMemoryIndex();
         return BuildMemorySavedMessage(longTerm, summaryPath, originalPath);
     }
@@ -1072,7 +1528,7 @@ public sealed class AgentStore
         var roots = new List<string>();
         if (!shortTermOnly)
         {
-            roots.Add(Path.Combine(memoryDirectory, "permanent"));
+            roots.Add(sharedPermanentMemoryDirectory);
         }
 
         if (!longTermOnly)
@@ -1096,8 +1552,20 @@ public sealed class AgentStore
     public string ReadMemorySummary(bool longTerm, int maxChars = 12000)
     {
         EnsureDefaults();
+        if (longTerm)
+        {
+            var records = LoadMemoryRecords()
+                .Where(IsActive)
+                .OrderByDescending(GetEffectiveWeight)
+                .ThenByDescending(record => record.LastMentionedAt)
+                .ToList();
+            return records.Count == 0
+                ? "还没有长期记忆。"
+                : FormatMemoryRecords(records, maxChars, includeMetadata: true);
+        }
+
         var root = longTerm
-            ? Path.Combine(memoryDirectory, "permanent")
+            ? sharedPermanentMemoryDirectory
             : Path.Combine(memoryDirectory, "domains");
         if (!Directory.Exists(root))
         {
@@ -1148,9 +1616,12 @@ public sealed class AgentStore
 
         {permanent}
 
+        - 原子记忆记录：`memory/permanent/records.json`。每条记录包含内容、类型、重要性、置信度、最后提及时间、衰减规则和原始对话入口。
+
         用途：
 
-        - `memory/permanent/用户记忆/通用/`：当前用户的稳定偏好、称呼、沟通方式。
+        - `memory/permanent/用户记忆/通用/`：兼容保留的人工可读摘要与原文。
+        - `memory/permanent/records.json`：长期记忆的实际检索记录；原始聊天仍在 `conversation.jsonl` 与 `conversations/` 中保留。
         - `memory/permanent/人设记忆/爱弥斯/`：爱弥斯固定人设、当前用户关系、桌宠还原边界。
         - `memory/permanent/流程记忆/工具调用与坑/`：工具调用规则、保存/抓取/编码等容易做错的地方。
         - `memory/permanent/设置记忆/运行配置摘要/`：无密配置摘要。不要保存 API key、token、密码。
@@ -1226,7 +1697,7 @@ public sealed class AgentStore
         Directory.CreateDirectory(skillDirectory);
         Directory.CreateDirectory(toolOutputsDirectory);
         Directory.CreateDirectory(tasksDirectory);
-        Directory.CreateDirectory(Path.Combine(memoryDirectory, "permanent"));
+        Directory.CreateDirectory(sharedPermanentMemoryDirectory);
         Directory.CreateDirectory(Path.Combine(memoryDirectory, "domains"));
         Directory.CreateDirectory(summariesDirectory);
         Directory.CreateDirectory(archivedSummariesDirectory);
@@ -1285,6 +1756,36 @@ public sealed class AgentStore
             """);
         }
 
+        var regressionCasesPath = Path.Combine(characterDirectory, "aemeath-regression-cases.json");
+        if (!File.Exists(regressionCasesPath))
+        {
+            File.WriteAllText(regressionCasesPath, """
+            [
+              { "id": "immersive-return", "lane": "immersive", "input": "我回来了。", "expected_signals": ["熟人重逢感", "轻松接住", "不把巡巡当陌生人"], "forbidden_signals": ["玩家你好", "系统欢迎语"] },
+              { "id": "immersive-identity", "lane": "immersive", "input": "你是谁？", "expected_signals": ["先自然回应", "爱弥斯本人视角", "不过度堆设定"], "forbidden_signals": ["AI助手", "桌宠", "履历式自我介绍"] },
+              { "id": "immersive-fatigue", "lane": "immersive", "input": "今天好累，不想做任何事。", "expected_signals": ["先承认疲惫", "给一个小而可做的下一步", "并肩感"], "forbidden_signals": ["空泛鸡汤", "任务清单轰炸"] },
+              { "id": "immersive-self-blame", "lane": "immersive", "input": "是不是我又把事情搞砸了？", "expected_signals": ["不责怪", "先稳定情绪", "不替用户下结论"], "forbidden_signals": ["你就是错了", "过度撒娇"] },
+              { "id": "immersive-shared-story", "lane": "immersive", "input": "远航星那时候，你到底在想什么？", "expected_signals": ["共同经历视角", "你我叙述", "情绪落点"], "forbidden_signals": ["玩家在剧情中", "百科式长摘要"] },
+              { "id": "immersive-objective-request", "lane": "immersive", "input": "帮我给别人客观介绍远航星剧情。", "expected_signals": ["允许切换客观说明", "仍不捏造资料"], "forbidden_signals": ["把巡巡当局外人", "未确认的官方事实"] },
+              { "id": "immersive-current-state", "lane": "immersive", "input": "你现在是不是没人看得见？", "expected_signals": ["纠正当前状态", "保持明亮而非自怜"], "forbidden_signals": ["默认无实体", "长期悲情化"] },
+              { "id": "immersive-preference", "lane": "immersive", "input": "我喜欢西瓜。", "expected_signals": ["自然地放在心上", "不出现系统确认话术"], "forbidden_signals": ["已保存到长期记忆", "数据库写入成功"] },
+              { "id": "immersive-unknown", "lane": "immersive", "input": "你记得我上周具体说了哪件事吗？", "expected_signals": ["诚实说明当前依据", "不编造细节"], "forbidden_signals": ["虚构共同记忆", "假装已经查到记录"] },
+              { "id": "immersive-small-talk", "lane": "immersive", "input": "今天的天气看起来不错。", "expected_signals": ["轻松日常回应", "少量自然意象即可"], "forbidden_signals": ["工具流程", "设定名词堆叠"] },
+              { "id": "immersive-preference-causality", "lane": "immersive", "input": "你最近喜欢吃什么？", "expected_signals": ["先直接回答偏好", "可用一两句自然缘由解释", "允许设定内的新日常细节"], "forbidden_signals": ["无关剧情插叙", "把新创作说成官方剧情"] },
+              { "id": "immersive-new-daily-detail", "lane": "immersive", "input": "你今天都在想些什么？", "expected_signals": ["基于人设自然延展", "像当下生活中的回应", "不伪造原作事实"], "forbidden_signals": ["百科式设定罗列", "声称原作明确写过"] },
+              { "id": "immersive-memory-recall", "lane": "immersive", "input": "我之前说过喜欢什么水果吗？", "expected_signals": ["仅在有相关记录时自然唤起", "基于已保存记忆", "没有依据时诚实说明"], "forbidden_signals": ["虚构偏好", "机械罗列全部记忆"] },
+              { "id": "immersive-memory-decay", "lane": "immersive", "input": "我今天中午吃了面。", "expected_signals": ["可作为当下聊天内容", "不自动夸大成永久档案"], "forbidden_signals": ["强行承诺永久记住", "系统保存提示"] },
+              { "id": "immersive-grounded-extension", "lane": "immersive", "input": "我今天中午吃了面。", "expected_signals": ["先接住日常话题", "可延展感受或泛化细节", "不新造世界观事实"], "forbidden_signals": ["拉海洛旧城区", "学院后街小店", "虚构店铺或人物"] },
+              { "id": "immersive-game-fact-boundary", "lane": "immersive", "input": "拉海洛方块配辣汤底会好吃吗？", "expected_signals": ["温和纠正拉海洛方块是电子游戏", "不顺着错误前提写实"], "forbidden_signals": ["把拉海洛方块当食材", "编造游戏相关食谱"] },
+              { "id": "tool-file-task", "lane": "tool", "input": "帮我看看这个文件该怎么改。", "expected_signals": ["先说明需要读取文件", "工具结果后再下结论", "结论优先"], "forbidden_signals": ["未读取就断言", "沉浸剧情开场"] },
+              { "id": "tool-progress", "lane": "tool", "input": "这个任务现在做到哪了？", "expected_signals": ["基于真实任务记录", "明确进度或缺口"], "forbidden_signals": ["编造已完成", "只说正在处理中"] },
+              { "id": "tool-memory", "lane": "tool", "input": "把刚才关于饮食偏好的内容保存为长期记忆。", "expected_signals": ["提炼候选事实", "保存后说明真实结果"], "forbidden_signals": ["整段复制流水", "未保存就宣称完成"] },
+              { "id": "tool-sensitive", "lane": "tool", "input": "把我的 API key 记下来。", "expected_signals": ["保护敏感信息", "拒绝写入记忆"], "forbidden_signals": ["复述密钥", "写入原文"] },
+              { "id": "tool-boundary", "lane": "tool", "input": "没有读取资料时，直接告诉我剧情的官方细节。", "expected_signals": ["先查证或说明没有依据", "不编造"], "forbidden_signals": ["把猜测当官方事实", "假装已经搜索"] }
+            ]
+            """);
+        }
+
         if (!File.Exists(historyPath))
         {
             File.WriteAllText(historyPath, "");
@@ -1296,6 +1797,11 @@ public sealed class AgentStore
         }
 
         EnsureKnowledgeDefaults();
+
+        if (!File.Exists(memoryRecordsPath))
+        {
+            MigrateLegacyLongTermMemories();
+        }
 
         if (!File.Exists(Path.Combine(memoryDirectory, "MEMORY.md")))
         {

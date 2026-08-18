@@ -14,6 +14,22 @@ namespace DockPetWin;
 public partial class AgentChatWindow : Window
 {
     private static readonly Random StatusRandom = new();
+    private static readonly string[] ImmersiveKnowledgeTools =
+    {
+        "tool_specs",
+        "search_knowledge",
+        "knowledge_search",
+        "read_knowledge",
+        "knowledge_read",
+        "list_files",
+        "find_files",
+        "find_file",
+        "search_files",
+        "file_search",
+        "read_file",
+        "write_file",
+        "handle_read"
+    };
     private readonly Dictionary<AgentConversationMode, AgentStore> stores = new()
     {
         [AgentConversationMode.Immersive] = new AgentStore(AgentConversationMode.Immersive),
@@ -49,7 +65,7 @@ public partial class AgentChatWindow : Window
 
     private bool IsImmersiveMode => currentMode == AgentConversationMode.Immersive;
 
-    private string ModeLabel => IsImmersiveMode ? "沉浸对话" : "日常对话";
+    private string ModeLabel => IsImmersiveMode ? "沉浸聊天" : "工具办事";
 
     private void LoadConversation()
     {
@@ -103,6 +119,11 @@ public partial class AgentChatWindow : Window
         {
             var settings = Store.LoadSettings();
             var profile = Store.BuildSystemPrompt(settings);
+            var relevantMemories = Store.BuildRelevantMemoryContext(text);
+            if (!string.IsNullOrWhiteSpace(relevantMemories))
+            {
+                profile += $"{Environment.NewLine}{Environment.NewLine}# 与本轮问题相关的过往记忆（仅在确实相关时自然使用）{Environment.NewLine}{Environment.NewLine}{relevantMemories.Trim()}";
+            }
             var extraSystemContext = IsImmersiveMode ? extraSystemContextProvider?.Invoke() : null;
             if (!string.IsNullOrWhiteSpace(extraSystemContext))
             {
@@ -112,27 +133,69 @@ public partial class AgentChatWindow : Window
             {
                 profile += $"{Environment.NewLine}{Environment.NewLine}{FirstConversationContext()}";
             }
+            if (LooksLikeLongTermPreference(text))
+            {
+                profile += $"""
 
-            var history = Store.LoadRecentHistory(settings.MaxHistoryMessages * 2);
-            var reply = await client.SendWithToolsAsync(
-                settings,
-                profile,
-                history,
-                text,
-                Store,
-                activeRequest.Token,
-                trace => Dispatcher.Invoke(() =>
-                {
-                    if (!WantsVisibleToolTrace(text))
+                # 用户偏好回应
+
+                用户这句话可能透露了稳定的个人喜好、习惯或称呼偏好。若内容确实是用户希望被记住的长期信息，请在正常回应里用爱弥斯的语气自然流露出“会放在心上、以后会留意”的意思。
+                不要使用“长期记忆”“系统”“保存成功”“已收录”等技术或确认话术，也不要机械复述用户的原话。把这件事当成你们之间自然发生的小约定。
+                """;
+            }
+
+            var history = Store.LoadRecentHistory(settings.MaxHistoryMessages * 2 + 1).ToList();
+            if (history.Count > 0
+                && history[^1].Role == "user"
+                && string.Equals(history[^1].Content, text, StringComparison.Ordinal))
+            {
+                history.RemoveAt(history.Count - 1);
+            }
+
+            string reply;
+            if (IsImmersiveMode)
+            {
+                reply = await client.SendWithToolsAsync(
+                    settings,
+                    profile,
+                    history,
+                    text,
+                    Store,
+                    activeRequest.Token,
+                    trace => Dispatcher.Invoke(() =>
                     {
                         StatusText.Text = IsKnowledgeTool(trace.Tool)
                             ? BuildKnowledgeThinkingStatus(assistantDisplayName)
                             : BuildThinkingStatus(assistantDisplayName);
-                        return;
-                    }
+                    }),
+                    ImmersiveKnowledgeTools);
+            }
+            else
+            {
+                reply = await client.SendWithToolsAsync(
+                    settings,
+                    profile,
+                    history,
+                    text,
+                    Store,
+                    activeRequest.Token,
+                    trace => Dispatcher.Invoke(() =>
+                    {
+                        if (!WantsVisibleToolTrace(text))
+                        {
+                            StatusText.Text = IsKnowledgeTool(trace.Tool)
+                                ? BuildKnowledgeThinkingStatus(assistantDisplayName)
+                                : BuildThinkingStatus(assistantDisplayName);
+                            return;
+                        }
 
-                    ShowToolTrace(trace);
-                }));
+                        ShowToolTrace(trace);
+                    }));
+            }
+            if (IsImmersiveMode)
+            {
+                reply = AgentStore.ApplyImmersiveGroundingGuard(text, reply);
+            }
             Store.AppendHistory("assistant", reply);
             ShowExchangeBubble(assistantDisplayName, reply, alignRight: false);
             if (IsImmersiveMode)
@@ -142,7 +205,7 @@ public partial class AgentChatWindow : Window
             }
             var autoSavedPreference = await TryAutoSaveLongTermPreferenceAsync(settings, text, reply, activeRequest.Token);
             await TryCompressHistoryIfNeeded(settings, activeRequest.Token);
-            StatusText.Text = autoSavedPreference ? "已回复；记下了一点偏好" : "已回复";
+            StatusText.Text = autoSavedPreference ? $"{assistantDisplayName}把这件事放在心上了" : "已回复";
         }
         catch (Exception ex)
         {

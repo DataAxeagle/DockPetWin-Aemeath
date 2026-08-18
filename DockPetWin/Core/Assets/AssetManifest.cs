@@ -75,6 +75,9 @@ public sealed class Animations
 {
     [JsonPropertyName("walk")]
     public Animation Walk { get; set; } = new();
+
+    [JsonPropertyName("sing")]
+    public Animation Sing { get; set; } = new();
 }
 
 public sealed class Animation

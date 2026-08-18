@@ -38,7 +38,7 @@ public sealed class AgentChatSettings
     public string TavilyApiKeyEnv { get; set; } = "TAVILY_API_KEY";
 
     [JsonPropertyName("temperature")]
-    public double Temperature { get; set; } = 0.7;
+    public double Temperature { get; set; } = 0.6;
 
     [JsonPropertyName("max_history_messages")]
     public int MaxHistoryMessages { get; set; } = 30;

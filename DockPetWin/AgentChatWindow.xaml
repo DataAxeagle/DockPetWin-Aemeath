@@ -110,11 +110,11 @@
                             ToolTip="沉浸对话会使用小屋语境和首次重逢背景"
                             Click="ImmersiveTab_Click" />
                     <Button x:Name="DailyTabButton"
-                            Content="日常"
+                            Content="办事"
                             MinWidth="68"
                             Height="34"
                             Margin="6,0,0,0"
-                            ToolTip="日常对话不加载首次重逢背景，记忆和上下文独立保存"
+                            ToolTip="工具办事会使用独立的任务上下文，并允许执行已启用的工具"
                             Click="DailyTab_Click" />
                 </StackPanel>
             </Grid>

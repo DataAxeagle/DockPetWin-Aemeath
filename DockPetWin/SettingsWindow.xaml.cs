@@ -88,6 +88,7 @@ public partial class SettingsWindow : Window
         RestMaxBox.Text = Format(settings.RestDurationMaximumSeconds / 60);
         WalkMinBox.Text = Format(settings.WalkDurationMinimumSeconds / 60);
         WalkMaxBox.Text = Format(settings.WalkDurationMaximumSeconds / 60);
+        QQMusicSingingBox.IsChecked = settings.EnableQQMusicSinging;
         RemindersEnabledBox.IsChecked = settings.RemindersEnabled;
         reminderRows.Clear();
         foreach (var reminder in settings.Reminders)
@@ -219,6 +220,7 @@ public partial class SettingsWindow : Window
         settings.RestDurationMaximumSeconds = restMax * 60;
         settings.WalkDurationMinimumSeconds = walkMin * 60;
         settings.WalkDurationMaximumSeconds = walkMax * 60;
+        settings.EnableQQMusicSinging = QQMusicSingingBox.IsChecked == true;
         settings.RemindersEnabled = RemindersEnabledBox.IsChecked == true;
         settings.ReminderSchemaInitialized = true;
         settings.Reminders = reminderRows

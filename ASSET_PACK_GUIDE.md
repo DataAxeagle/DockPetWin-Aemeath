@@ -25,11 +25,15 @@ UserData\AssetPacks
 my-pet
 ├─ manifest.json
 ├─ animations
-│  └─ walk
-│     ├─ walk_01.png
-│     ├─ walk_02.png
-│     ├─ walk_03.png
-│     └─ walk_04.png
+│  ├─ walk
+│  │  ├─ walk_01.png
+│  │  ├─ walk_02.png
+│  │  ├─ walk_03.png
+│  │  └─ walk_04.png
+│  └─ sing
+│     ├─ sing_01.png
+│     ├─ sing_02.png
+│     └─ sing_03.png
 └─ poses
    ├─ dialogue
    │  └─ stand.png
@@ -73,6 +77,14 @@ PNG 必须带真正的透明 alpha 通道。图片里画出来的棋盘格不等
         "animations/walk/walk_03.png",
         "animations/walk/walk_04.png"
       ]
+    },
+    "sing": {
+      "fps": 3,
+      "frames": [
+        "animations/sing/sing_01.png",
+        "animations/sing/sing_02.png",
+        "animations/sing/sing_03.png"
+      ]
     }
   }
 }
@@ -88,6 +100,7 @@ PNG 必须带真正的透明 alpha 通道。图片里画出来的棋盘格不等
 - `poses`：各类静态姿态目录。
 - `display_sizes`：特殊姿态显示尺寸覆盖，目前常用于 `held`。
 - `animations.walk`：走路动画设置。
+- `animations.sing`：可选唱歌动画设置；QQ 音乐播放时会优先使用。
 
 ## 姿态素材
 
@@ -98,6 +111,7 @@ PNG 必须带真正的透明 alpha 通道。图片里画出来的棋盘格不等
 - `dialogue`：对话或提示时使用的站立姿态。
 - `transition`：休息和散步之间的过渡姿态，例如伸懒腰、打哈欠。
 - `animations\walk`：走路序列帧。
+- `animations\sing`：可选唱歌序列帧。
 
 如果某一类资源缺失、路径写错或图片加载失败，DockPetWin 会对缺失类别回退使用默认资源。这样可以先做一部分素材，再逐步补齐。
 
@@ -129,6 +143,42 @@ animations\walk\walk_04.png
 ```
 
 `fps` 控制走路帧播放速度。角色动作偏慢可以调高，动作太急可以调低。
+
+## 唱歌动画
+
+如果希望桌宠检测到 QQ 音乐播放时进入专门唱歌动作，可以提供透明 PNG 序列帧：
+
+```text
+animations\sing\sing_01.png
+animations\sing\sing_02.png
+animations\sing\sing_03.png
+```
+
+然后在 `manifest.json` 中写入：
+
+```json
+"animations": {
+  "walk": {
+    "fps": 3,
+    "frames": [
+      "animations/walk/walk_01.png",
+      "animations/walk/walk_02.png",
+      "animations/walk/walk_03.png",
+      "animations/walk/walk_04.png"
+    ]
+  },
+  "sing": {
+    "fps": 3,
+    "frames": [
+      "animations/sing/sing_01.png",
+      "animations/sing/sing_02.png",
+      "animations/sing/sing_03.png"
+    ]
+  }
+}
+```
+
+如果不提供 `animations\sing`，应用会退回 `dialogue` 姿态，并叠加轻微摆动作为唱歌状态。这样旧资源包不需要立刻补素材。
 
 ## 可选：从绿幕视频抽帧
 
@@ -186,6 +236,7 @@ UserData\Home
 - 图片边缘留出适度透明边距，避免拖动或缩放时被裁切。
 - 同一资源包内尽量统一画布尺寸。
 - 走路帧的角色大小、脚底高度和朝向要稳定。
+- 唱歌帧建议保持脚底、头顶和整体画布尺寸稳定，只改变嘴型、表情或轻微身体动作。
 - 文件名建议使用英文、数字、下划线或连字符，避免路径兼容问题。
 - 对外分享前，先在设置里切换到该资源包，确认休息、散步、拖动和对话都能正常显示。
 

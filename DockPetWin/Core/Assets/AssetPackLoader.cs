@@ -141,6 +141,7 @@ public sealed class AssetPackLoader
             SafeLoad(() => LoadImages(Path.Combine(root, NormalizePath(manifest.Poses.Transition)))),
             SafeLoad(() => LoadImages(Path.Combine(root, NormalizePath(manifest.Poses.Held)))),
             SafeLoad(() => LoadImages(Path.Combine(root, NormalizePath(manifest.Poses.Dialogue)))),
+            SafeLoad(() => LoadAnimationFrames(root, manifest.Animations.Sing, "sing")),
             root,
             loadError);
 
@@ -156,6 +157,7 @@ public sealed class AssetPackLoader
             pack.TransitionPoses.Count > 0 ? pack.TransitionPoses : fallback.TransitionPoses,
             pack.HeldPoses.Count > 0 ? pack.HeldPoses : fallback.HeldPoses,
             pack.DialoguePoses.Count > 0 ? pack.DialoguePoses : fallback.DialoguePoses,
+            pack.SingingFrames.Count > 0 ? pack.SingingFrames : fallback.SingingFrames,
             pack.RootPath,
             pack.LoadError);
     }
@@ -264,6 +266,10 @@ public sealed class AssetPackLoader
               "video": "animations/walk/walk.mp4",
               "video_frame_count": 4,
               "frames": []
+            },
+            "sing": {
+              "fps": 3,
+              "frames": []
             }
           }
         }
@@ -315,6 +321,20 @@ public sealed class AssetPackLoader
         }
 
         return [];
+    }
+
+    private static IReadOnlyList<BitmapImage> LoadAnimationFrames(string root, Animation animation, string defaultFolderName)
+    {
+        if (animation.Frames.Length > 0)
+        {
+            return animation.Frames
+                .Select(frame => Path.Combine(root, NormalizePath(frame)))
+                .Where(File.Exists)
+                .Select(LoadImage)
+                .ToList();
+        }
+
+        return LoadImages(Path.Combine(root, "animations", defaultFolderName));
     }
 
     private static IReadOnlyList<BitmapImage> LoadImages(string directory)
